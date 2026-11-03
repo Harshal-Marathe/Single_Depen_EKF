@@ -1,7 +1,11 @@
 """
 Tab 4 — Model Configuration: variable roles, positive-beta constraints,
-cross-media learning, adstock type, per-variable hyperparameter bounds,
-train/test split, and saving the final config.
+cross-media learning, per-variable hyperparameter bounds, train/test
+split, and saving the final config.
+
+Adstock has been removed from the model entirely (own and competitor
+media both now contribute via raw spend directly), so there is no
+longer an Adstock Function section here.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ import streamlit as st
 
 from modules.ui_helpers import (
     section, info, positive_info, per_channel_info, prophet_info,
-    weibull_placeholder, need_data, safe_multiselect,
+    need_data, safe_multiselect,
 )
 
 
@@ -115,18 +119,8 @@ def render_tab4():
 
     st.divider()
 
-    # ── D. Adstock type ───────────────────────────────────────────────
-    st.markdown("### D · Adstock Function")
-    adstock_type = st.radio("Adstock type", ["Nerlove-Arrow (geometric)", "Weibull"],
-                             horizontal=True, key="adstock_type")
-    use_weibull = adstock_type.startswith("Weibull")
-    if use_weibull:
-        weibull_placeholder()
-
-    st.divider()
-
-    # ── D2. Per-Variable Hyperparameter Bounds ───────────────────────
-    st.markdown("### D2 · Per-Variable Hyperparameter Bounds")
+    # ── D. Per-Variable Hyperparameter Bounds ────────────────────────
+    st.markdown("### D · Per-Variable Hyperparameter Bounds")
     per_channel_info(
         "🎛️ <b>All hyperparameter bounds are set here, per variable.</b> "
         "Defaults are derived automatically from each channel's data distribution. "
@@ -182,23 +176,6 @@ def render_tab4():
                                              float(f"{def_s_hi:.4g}"),
                                              key=f"hs_hi_{col}", format="%.4g")
                 per_channel_bounds[col]["hill_s"] = (hs_lo, hs_hi)
-                st.divider()
-
-                if use_weibull:
-                    st.markdown("**Weibull Adstock Shape (α) and Scale (θ)**")
-                    wa1, wa2, wa3, wa4 = st.columns(4)
-                    with wa1: wa_alo = st.number_input("α min", 0.001, 10.0, 0.1, 0.01, key=f"wa_alo_{col}")
-                    with wa2: wa_ahi = st.number_input("α max", 0.001, 10.0, 3.0, 0.01, key=f"wa_ahi_{col}")
-                    with wa3: wt_lo  = st.number_input("θ min", 0.001, 10.0, 0.1, 0.01, key=f"wt_lo_{col}")
-                    with wa4: wt_hi  = st.number_input("θ max", 0.001, 10.0, 3.0, 0.01, key=f"wt_hi_{col}")
-                    per_channel_bounds[col]["adstock_alpha"] = (wa_alo, wa_ahi)
-                    per_channel_bounds[col]["adstock_theta"] = (wt_lo,  wt_hi)
-                else:
-                    st.markdown("**Nerlove-Arrow Adstock Decay (λ)**")
-                    na1, na2 = st.columns(2)
-                    with na1: na_lo = st.number_input("λ min", 0.0, 0.999, 0.0,  0.01, key=f"na_lo_{col}")
-                    with na2: na_hi = st.number_input("λ max", 0.0, 0.999, 0.99, 0.01, key=f"na_hi_{col}")
-                    per_channel_bounds[col]["adstock_lambda"] = (na_lo, na_hi)
 
                 st.caption(f"✅ Bounds set for: {', '.join(per_channel_bounds[col].keys())}")
     else:
@@ -235,8 +212,16 @@ def render_tab4():
     c1, c2 = st.columns(2)
     with c1: use_organic = st.checkbox("Organic drift (μ) in intercept state", key="use_organic")
     with c2: use_price   = st.checkbox("Include price effects", value=bool(price_vars), key="use_price")
-    intercept_effectors = safe_multiselect("Intercept effectors (media boosting baseline)",
-                                            options=media, default=media, key="intercept_eff")
+    intercept_effector_options = list(media) + list(non_media)
+    intercept_effectors = safe_multiselect(
+        "Intercept effectors (media or non-media/organic variables boosting baseline)",
+        options=intercept_effector_options, default=list(media), key="intercept_eff")
+    if any(c in non_media for c in intercept_effectors):
+        info(
+            "Non-media effectors boost the intercept using their <b>raw value</b> each "
+            "period (no Hill/saturation curve is applied — consistent with how "
+            "non-media variables are treated everywhere else in the model)."
+        )
 
     if st.button("💾 Save Configuration", type="primary", use_container_width=True):
         if not media:
@@ -254,7 +239,6 @@ def render_tab4():
                 "dummy_cols": [],
                 "intercept_effectors": intercept_effectors,
                 "cross_media_map": cross_map,
-                "adstock_type": "weibull" if use_weibull else "nerlove_arrow",
                 "use_organic": use_organic,
                 "use_price": use_price,
                 "train_ratio": train_ratio,
@@ -272,7 +256,6 @@ def render_tab4():
                 f"✅ Saved — {len(media)} own-media · {len(comp_media)} competitor · "
                 f"{len(non_media)} non-media "
                 f"({len(prophet_in_model)} prophet col{'s' if len(prophet_in_model)!=1 else ''}) · "
-                f"adstock: **{'Weibull' if use_weibull else 'Nerlove-Arrow'}** · "
                 f"train/test: **{n_train}/{n_test}** · "
                 f"positive-beta: **{len(positive_beta_cols)}** · "
                 f"per-variable bound params: **{n_bounds_set}**"

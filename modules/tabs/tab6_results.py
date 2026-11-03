@@ -13,6 +13,7 @@ from plotly.subplots import make_subplots
 
 from modules.ui_helpers import section, need_model
 from modules.transforms import hill_transform
+from modules.exports import build_betas_df, build_master_workbook_bytes
 
 
 def render_tab6():
@@ -100,6 +101,37 @@ def render_tab6():
         df_lt.insert(0, "Rank", range(1, len(df_lt)+1))
         st.dataframe(df_lt, use_container_width=True, hide_index=True)
 
+    # FIX: cross-media synergy contributions (configured in Tab 4 ·
+    # Section C) were computed by the filter and present in contrib_df
+    # (see pipeline.py) but nothing in this tab ever read out the
+    # Synergy_ columns — they were invisible in the UI even though the
+    # numbers existed. Adding a dedicated summary here.
+    synergy_cols = [c for c in contrib_df.columns if c.startswith("Synergy_")]
+    if synergy_cols:
+        st.markdown("#### 🔗 Cross-Media Synergy Contribution Summary")
+        totals_syn = contrib_df[synergy_cols].sum()
+        syn_vals = totals_syn.values
+        syn_tot  = np.abs(syn_vals).sum() + 1e-12
+        df_syn = pd.DataFrame({
+            "Synergy Pair": [c.replace("Synergy_", "").replace("_from_", " ← from ")
+                              for c in synergy_cols],
+            "Total Contrib": syn_vals.round(2),
+            "Share (%)": (np.abs(syn_vals) / syn_tot * 100).round(1),
+        }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
+        df_syn.insert(0, "Rank", range(1, len(df_syn)+1))
+        st.dataframe(df_syn, use_container_width=True, hide_index=True)
+
+        fig_syn = px.bar(
+            df_syn.sort_values("Total Contrib"),
+            x="Total Contrib", y="Synergy Pair", orientation="h",
+            title="Cross-Media Synergy Contribution by Pair",
+            color="Total Contrib", color_continuous_scale="Purples",
+        )
+        fig_syn.update_layout(height=max(300, 45*len(synergy_cols)), template="plotly_white")
+        st.plotly_chart(fig_syn, use_container_width=True)
+    else:
+        st.caption("No cross-media synergy pairs were configured in Tab 4 · Section C.")
+
     with st.expander("📊 Pie Charts"):
         pc1, pc2 = st.columns(2)
         with pc1:
@@ -131,6 +163,54 @@ def render_tab6():
         st.dataframe(contrib_df.style.format("{:,.4f}"), use_container_width=True)
     st.download_button("📥 Download Contribution Table",
                        contrib_df.to_csv().encode(), "contributions.csv", "text/csv")
+
+    st.markdown("### E2 · Synergy / Cross-Media Effects")
+    synergy_df = res.get("synergy_df")
+    synergy_cols = [c for c in contrib_df.columns if c.startswith("Synergy_")]
+    if synergy_df is None or synergy_df.empty or not synergy_cols:
+        st.info(
+            "No cross-media synergy relationships are configured for this model. "
+            "Set them up in **Tab 4 · Section C (Cross-media Learning)** and re-run."
+        )
+    else:
+        st.caption(
+            "One row per configured source → target relationship "
+            "(per-variable level, not a single aggregated number)."
+        )
+        st.dataframe(
+            synergy_df.style.format({
+                "Total Synergy Contribution": "{:,.4f}",
+                "Avg Synergy / Period":       "{:,.4f}",
+                "Cross Delta":                "{:.4f}",
+                "Cross Hill n":                "{:.3f}",
+                "Cross Hill S":                "{:.3f}",
+                "Share of Target's Total Contrib (%)": "{:.2f}",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+        st.download_button("📥 Download Synergy Table",
+                           synergy_df.to_csv(index=False).encode(),
+                           "synergy_table.csv", "text/csv")
+
+        pair_labels = [f"{row['Source Channel']} → {row['Target Channel']}"
+                        for _, row in synergy_df.iterrows()]
+        fig_syn_bar = px.bar(
+            x=synergy_df["Total Synergy Contribution"].values, y=pair_labels,
+            orientation="h", title="Total Synergy Contribution by Pair",
+            labels={"x": "Total Contribution", "y": ""},
+            color=synergy_df["Total Synergy Contribution"].values,
+            color_continuous_scale="Purples",
+        )
+        fig_syn_bar.update_layout(height=max(300, 50*len(pair_labels)), template="plotly_white")
+        st.plotly_chart(fig_syn_bar, use_container_width=True)
+
+        fig_syn_area = px.area(
+            contrib_df.reset_index(), x=x_axis, y=synergy_cols,
+            title="Synergy Contributions Over Time (per pair)",
+            color_discrete_sequence=px.colors.qualitative.Vivid,
+        )
+        fig_syn_area.update_layout(height=380, template="plotly_white")
+        st.plotly_chart(fig_syn_area, use_container_width=True)
 
     st.markdown("### F · Estimated Parameters")
     param_df = res["param_df"]
@@ -168,7 +248,6 @@ def render_tab6():
     st.markdown("### H · Response Curves")
     params       = res["params"]
     media_list   = config["media"]
-    adstock_type = config["adstock_type"]
 
     if not media_list:
         st.info("No media channels configured.")
@@ -188,19 +267,11 @@ def render_tab6():
         beta_p75 = float(np.percentile(res["x_smooth"][:, idx+1], 75))
         n_v = params["n_params"][idx]; S_v = params["S_params"][idx]
 
-        if adstock_type == "weibull":
-            aw = params["adstock_alpha"][idx]; tw = params["adstock_theta"][idx]
-            t_w = np.arange(1, 53, dtype=float)
-            ker = (aw/tw) * ((t_w/tw)**(aw-1)) * np.exp(-((t_w/tw)**aw))
-            ker /= (ker.sum() + 1e-12)
-            am = ker.max(); adstock_label = f"Weibull (α={aw:.3f}, θ={tw:.3f})"
-        else:
-            lam = params["adstock_lambda"][idx]
-            am  = 1.0 / (1.0 - lam + 1e-8)
-            adstock_label = f"Nerlove-Arrow (λ={lam:.3f})"
-
+        # Hill is applied directly to raw media spend (adstock has been
+        # removed from the model entirely), so the response curve's
+        # x-axis is raw spend with no carry-over scaling applied.
         def make_resp(b):
-            return np.array([b * hill_transform(x * am, n_v, S_v) for x in x_range])
+            return np.array([b * hill_transform(x, n_v, S_v) for x in x_range])
 
         resp_med = make_resp(beta_med)
         resp_p25 = make_resp(beta_p25)
@@ -276,3 +347,40 @@ def render_tab6():
                               for k, v in pcb.items()]),
                 use_container_width=True, hide_index=True,
             )
+
+    st.divider()
+    st.markdown("### I · Export Center")
+    info_text = (
+        "Three ways to take results outside the app: just the betas, just the "
+        "hyperparameters, or one structured Excel workbook with everything laid "
+        "out as <b>Raw variables → Transformed variables → Betas → "
+        "Contributions (Beta × Transformed)</b>, plus hyperparameters / ROI / "
+        "synergy on their own sheets."
+    )
+    st.markdown(f'<div class="info-box">{info_text}</div>', unsafe_allow_html=True)
+
+    ec1, ec2, ec3 = st.columns(3)
+    with ec1:
+        betas_df = build_betas_df(res, df)
+        st.download_button(
+            "📥 Download Betas (Time Series)",
+            betas_df.to_csv(index=False).encode(),
+            "betas_timeseries.csv", "text/csv",
+            use_container_width=True,
+        )
+    with ec2:
+        st.download_button(
+            "📥 Download Hyperparameters",
+            param_df.to_csv(index=False).encode(),
+            "hyperparameters.csv", "text/csv",
+            use_container_width=True,
+        )
+    with ec3:
+        workbook_bytes = build_master_workbook_bytes(res, config, df)
+        st.download_button(
+            "📊 Download Full Excel Workbook",
+            workbook_bytes,
+            "rainbrain_model_export.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )

@@ -23,7 +23,7 @@ def render_tab5(nevergrad_available: bool):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Media channels", len(config["media"]))
     c2.metric("Price vars",     len(config.get("price", [])))
-    c3.metric("Adstock",        config["adstock_type"].replace("_", " ").title())
+    c3.metric("Competitor media", len(config.get("comp_media", [])))
     c4.metric("Train / Test",   f"{config['n_train']} / {config['n_test']}")
 
     pb_cols = config.get("positive_beta_cols", [])

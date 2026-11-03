@@ -11,6 +11,7 @@ _defaults = {
     "config": None,
     "model_results": None,
     "model_fitted": False,
+    "_last_uploaded_file_id": None,  # (name, size) of last processed upload — see tab1
 }
 
 

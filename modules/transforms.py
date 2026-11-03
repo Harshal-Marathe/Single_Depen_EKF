@@ -21,7 +21,18 @@ def hill_transform(x: float, n: float, S: float) -> float:
 def adstock_nerlove_arrow(x: pd.Series, lam: float) -> np.ndarray:
     arr = x.values.astype(float)
     out = np.empty_like(arr)
-    out[0] = arr[0] / (1.0 - lam + 1e-8)
+    # FIX: out[0] = arr[0]/(1-lam) assumes period-0's spend level has
+    # been running forever (the geometric-series steady-state
+    # assumption). That's a reasonable way to avoid an artificial
+    # "cold start" of zero history, but when lam is close to 1 (e.g.
+    # 0.98+, a common fitted/default value), 1-lam is tiny and this
+    # inflates the very first adstocked value by 30-50x relative to
+    # every other period — a single outsized data point that, combined
+    # with the EKF's initial uncertainty, was driving a large spurious
+    # correction at t=0. Capping the decay used for this one-time seed
+    # keeps the steady-state idea without letting it blow up.
+    decay_for_seed = min(lam, 0.9)
+    out[0] = arr[0] / (1.0 - decay_for_seed + 1e-8)
     for t in range(1, len(arr)):
         out[t] = arr[t] + lam * out[t - 1]
     return out
