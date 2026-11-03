@@ -35,6 +35,13 @@ def _composite_loss(theta, df_train, g, ng_weights):
                 loss += w_pos * max(0, -p["delta_own_nonmedia"][k]) ** 2
         for j in range(g["N_COMP"]):
             loss += w_pos * max(0, p["delta_comp"][j]) ** 2
+        # Negative beta constraints
+        for i, col in enumerate(g["MEDIA_COLS"]):
+            if col in g.get("NEGATIVE_BETA_COLS", []):
+                loss += w_pos * max(0, p["delta"][i]) ** 2
+        for k, col in enumerate(g["OWN_NONMEDIA_COLS"]):
+            if col in g.get("NEGATIVE_BETA_COLS", []):
+                loss += w_pos * max(0, p["delta_own_nonmedia"][k]) ** 2
         return float(loss)
     except Exception:
         return 1e12

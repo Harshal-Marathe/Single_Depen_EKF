@@ -7,16 +7,15 @@ hyperparameters / ROI / synergy.
 
 Design note: for every variable, Contribution = Beta * Transformed holds
 exactly, by construction:
-  - Intercept: Raw = Transformed = 1.0
-  - Every other variable (media, comp media, non-media, comp non-media,
-    price): Transformed = Raw. Adstock has been removed from the model
-    entirely (own and competitor media both now use raw spend directly),
-    so there is no longer any transform distinct from the raw value for
-    any variable type. The Transformed block is kept for layout
-    consistency / forward-compatibility, but will currently mirror Raw
-    column-for-column.
+  - Intercept:           Raw = Transformed = 1.0
+  - Media / Comp Media:  Transformed = adstocked spend (what the
+                          observation equation actually multiplies the
+                          beta by — see kalman.py _build_observation_matrix)
+  - Non-media / Comp Non-media / Price: Transformed = Raw (no transform
+                          is applied to these — used as-is)
 This keeps the identity Beta x Transformed = Contribution true for every
-single column in the workbook.
+single column in the workbook, which is what makes the four-block layout
+useful as a single coherent sheet rather than four unrelated tables.
 """
 
 import io
@@ -58,17 +57,19 @@ def build_betas_df(res, df_full):
     return out
 
 
-def _raw_and_transformed(name, group, df_full, T):
+def _raw_and_transformed(name, group, df_full, adstocked_media, T):
     if group == "intercept":
         return np.ones(T), np.ones(T)
     raw_vals = df_full[name].values.astype(float)
+    if group in ("media", "comp_media"):
+        return raw_vals, adstocked_media[name]
     return raw_vals, raw_vals.copy()
 
 
 def build_model_data_df(res, config, df_full):
     """Single-sheet layout: Period, Target, then Raw_* | Transformed_* |
     Beta_* | Contribution_* blocks, in that left-to-right order."""
-    g = res["g"]; x_smooth = res["x_smooth"]
+    g = res["g"]; x_smooth = res["x_smooth"]; adstocked_media = res["adstocked_media"]
     items = _build_variable_index(g)
     T = len(df_full)
 
@@ -76,7 +77,7 @@ def build_model_data_df(res, config, df_full):
     raw_cols, trans_cols, beta_cols, contrib_cols = [], [], [], []
 
     for name, group, idx in items:
-        raw_vals, trans_vals = _raw_and_transformed(name, group, df_full, T)
+        raw_vals, trans_vals = _raw_and_transformed(name, group, df_full, adstocked_media, T)
         beta_vals = x_smooth[:, idx]
         contrib_vals = beta_vals * trans_vals
 
@@ -147,9 +148,10 @@ def build_master_workbook_bytes(res, config, df_full):
         "Block": ["Raw_*", "Transformed_*", "Beta_*", "Contribution_*"],
         "Meaning": [
             "The variable's original value, as uploaded / merged into the dataset.",
-            "What the model actually multiplies the beta by. Adstock has been "
-            "removed from the model entirely, so this currently equals Raw for "
-            "every variable, including media and competitor media.",
+            "What the model actually multiplies the beta by. For media and "
+            "competitor media this is the adstocked (carry-over adjusted) spend. "
+            "For every other variable type, no transform is applied, so this "
+            "equals Raw.",
             "The EKF's smoothed, time-varying coefficient for that variable.",
             "Beta x Transformed for that variable and period — its modeled "
             "contribution to the target KPI in that period.",

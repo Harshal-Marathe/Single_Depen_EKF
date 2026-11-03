@@ -1,10 +1,13 @@
 """
-Transformation functions: Hill saturation curve and adstock (carry-over) models.
+Transformation functions: Hill saturation curve, power transformation,
+and adstock (carry-over) models including Weibull with per-lag weights.
 """
 
 import numpy as np
 import pandas as pd
 
+
+# ── Hill transformation ─────────────────────────────────────────────────────
 
 def hill_transform_vec(x: np.ndarray, n: float, S: float) -> np.ndarray:
     x = np.maximum(x, 0.0)
@@ -18,19 +21,24 @@ def hill_transform(x: float, n: float, S: float) -> float:
     return (x ** n) / (x ** n + S ** n + 1e-30)
 
 
+# ── Power transformation ────────────────────────────────────────────────────
+
+def power_transform_vec(x: np.ndarray, n: float) -> np.ndarray:
+    """Element-wise power transform: x^n, clamped to non-negative inputs."""
+    return np.maximum(x, 0.0) ** n
+
+
+def power_transform(x: float, n: float) -> float:
+    if x <= 0:
+        return 0.0
+    return x ** n
+
+
+# ── Adstock: Nerlove-Arrow (geometric / instant) ────────────────────────────
+
 def adstock_nerlove_arrow(x: pd.Series, lam: float) -> np.ndarray:
     arr = x.values.astype(float)
     out = np.empty_like(arr)
-    # FIX: out[0] = arr[0]/(1-lam) assumes period-0's spend level has
-    # been running forever (the geometric-series steady-state
-    # assumption). That's a reasonable way to avoid an artificial
-    # "cold start" of zero history, but when lam is close to 1 (e.g.
-    # 0.98+, a common fitted/default value), 1-lam is tiny and this
-    # inflates the very first adstocked value by 30-50x relative to
-    # every other period — a single outsized data point that, combined
-    # with the EKF's initial uncertainty, was driving a large spurious
-    # correction at t=0. Capping the decay used for this one-time seed
-    # keeps the steady-state idea without letting it blow up.
     decay_for_seed = min(lam, 0.9)
     out[0] = arr[0] / (1.0 - decay_for_seed + 1e-8)
     for t in range(1, len(arr)):
@@ -38,16 +46,74 @@ def adstock_nerlove_arrow(x: pd.Series, lam: float) -> np.ndarray:
     return out
 
 
-def adstock_weibull(x: pd.Series, alpha: float, theta: float) -> np.ndarray:
-    L = len(x)
-    t_idx = np.arange(1, L + 1, dtype=float)
-    weights = (alpha / theta) * ((t_idx / theta) ** (alpha - 1)) * np.exp(-((t_idx / theta) ** alpha))
-    weights = weights / (weights.sum() + 1e-12)
-    return np.convolve(x.values, weights, mode='full')[:L]
+# ── Adstock: Weibull with per-lag weights (delayed / distributed) ───────────
+
+def weibull_lag_weights(shape_k: float, scale_lam: float, n_lags: int) -> np.ndarray:
+    """
+    Compute normalised Weibull PDF weights for lag = 0, 1, …, n_lags-1.
+
+    Formula (per spec):
+        w_lag = (k / λ) * ((lag + 1) / λ)^(k - 1)
+    No exp term — this is the discrete Weibull PDF evaluated at
+    each (lag+1), then normalised to sum to 1.
+    """
+    lags = np.arange(1, n_lags + 1, dtype=float)          # lag+1 for lag=0..n_lags-1
+    w = (shape_k / scale_lam) * ((lags / scale_lam) ** (shape_k - 1))
+    w = np.maximum(w, 0.0)
+    total = w.sum()
+    if total < 1e-12:
+        w = np.ones(n_lags) / n_lags
+    else:
+        w /= total
+    return w
 
 
-def _adstock(series: pd.Series, adstock_type: str, params_dict: dict, chan_idx: int) -> np.ndarray:
+def adstock_weibull_lagged(x: pd.Series,
+                            shape_k: float,
+                            scale_lam: float,
+                            n_lags: int) -> np.ndarray:
+    """
+    Weighted sum of lagged raw spend using Weibull-derived weights.
+
+    adstocked[t] = Σ_{l=0}^{n_lags-1}  w_l * x[t - l]
+    """
+    arr = x.values.astype(float)
+    T = len(arr)
+    weights = weibull_lag_weights(shape_k, scale_lam, n_lags)
+    out = np.zeros(T)
+    for l, w in enumerate(weights):
+        if w < 1e-15:
+            continue
+        if l == 0:
+            out += w * arr
+        else:
+            out[l:] += w * arr[:-l]
+    return out
+
+
+# ── Dispatcher ───────────────────────────────────────────────────────────────
+
+def _adstock(series: pd.Series, adstock_type: str, params_dict: dict,
+             chan_idx: int) -> np.ndarray:
     if adstock_type == "weibull":
-        return adstock_weibull(series, params_dict["adstock_alpha"][chan_idx],
-                               params_dict["adstock_theta"][chan_idx])
+        n_lags = int(params_dict.get("adstock_n_lags", 8))
+        return adstock_weibull_lagged(
+            series,
+            params_dict["adstock_shape"][chan_idx],
+            params_dict["adstock_scale"][chan_idx],
+            n_lags,
+        )
+    # instant / Nerlove-Arrow
     return adstock_nerlove_arrow(series, params_dict["adstock_lambda"][chan_idx])
+
+
+def apply_transformation(x: np.ndarray, transform_type: str,
+                          n: float, S: float = 1.0) -> np.ndarray:
+    """
+    Apply either 'power' or 'hill' transformation to array x.
+    For power: returns x^n
+    For hill:  returns x^n / (x^n + S^n)
+    """
+    if transform_type == "hill":
+        return hill_transform_vec(x, n, S)
+    return power_transform_vec(x, n)

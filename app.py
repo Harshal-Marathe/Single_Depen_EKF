@@ -26,7 +26,7 @@ from modules.tabs.tab6_results import render_tab6
 # ════════════════════════════════════════════════════════════════════
 # PAGE CONFIG  (must be the first Streamlit call)
 # ════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="Rainbrain 2 v8", page_icon="📡",
+st.set_page_config(page_title="Rainbrain 2", page_icon="📡",
                    layout="wide", initial_sidebar_state="expanded")
 
 apply_styles()

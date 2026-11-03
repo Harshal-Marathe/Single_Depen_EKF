@@ -7,12 +7,9 @@ import streamlit as st
 
 def render_sidebar(nevergrad_available: bool):
     with st.sidebar:
-        st.markdown("## 📡 Rainbrain 2 v8")
+        st.markdown("## 📡 Rainbrain 2")
         st.markdown("**Extended Kalman Filter**  \nMarketing Mix Modeling")
-        if nevergrad_available:
-            st.success("✅ Nevergrad available")
-        else:
-            st.warning("⚠️ Nevergrad not installed\n`pip install nevergrad`")
+        
         st.divider()
         steps = {
             "1 · Data Upload":    st.session_state.df is not None,

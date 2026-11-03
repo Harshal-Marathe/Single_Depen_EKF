@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from modules.ui_helpers import section, need_model
-from modules.transforms import hill_transform
+from modules.transforms import hill_transform, power_transform, apply_transformation
 from modules.exports import build_betas_df, build_master_workbook_bytes
 
 
@@ -79,27 +79,101 @@ def render_tab6():
     totals_st  = contrib_df[short_cols].sum()
     totals_lt  = contrib_df[long_cols].sum()
 
+    media_spend_map = config.get("media_spend_map", {}) or {}
+
+    def _spend_for(name):
+        """Resolve the raw Spend total for a contribution-table row using the
+        user-defined spend map from Tab 4 (A2 · Spend Mapping). Returns NaN
+        for variables that aren't media/competitor-media (e.g. Intercept,
+        non-media, price) since ROI isn't defined for those."""
+        m = media_spend_map.get(name)
+        if not m:
+            return np.nan
+        spend_col = name if m.get("is_spend") else m.get("spend_col")
+        if not spend_col or spend_col not in df.columns:
+            return np.nan
+        return float(df[spend_col].sum())
+
+    def _contribution_table(totals, prefix, with_roi=False):
+        """
+        Share % logic:
+        1. raw_pct_i = |value_i| / sum(|all values|) * 100
+        2. Positives: scale so they sum to 100  =>  raw_pct_i / sum(raw_pct of positives) * 100
+        3. Negatives: keep as negative raw_pct  =>  -raw_pct_i
+        Result: positive shares sum to +100%, negatives are their true negative weight.
+
+        If with_roi=True, two extra columns are appended: "Sum of Spends"
+        (raw input spend, resolved via the Tab 4 spend map) and "ROI"
+        (Total Contrib / Sum of Spends). Both are NaN for variables that
+        have no spend mapping (Intercept, non-media, price, etc.).
+        """
+        names  = [c.replace(prefix, "") for c in totals.index]
+        values = totals.values.astype(float)
+
+        abs_vals  = np.abs(values)
+        total_abs = abs_vals.sum()
+
+        if total_abs < 1e-12:
+            shares = np.zeros_like(values)
+        else:
+            raw_pct     = abs_vals / total_abs * 100
+            pos_raw_sum = raw_pct[values > 0].sum()
+            shares = np.where(
+                values >= 0,
+                np.where(pos_raw_sum > 1e-12, raw_pct / pos_raw_sum * 100, 0.0),
+                -raw_pct,
+            )
+
+        pos_sum = values[values > 0].sum()
+        neg_sum = values[values < 0].sum()
+
+        df_out = pd.DataFrame({
+            "Channel":       names,
+            "Total Contrib": np.round(values, 2),
+            "Share (%)":     np.round(shares, 1),
+        }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
+        df_out.insert(0, "Rank", range(1, len(df_out)+1))
+
+        if with_roi:
+            spends = np.array([_spend_for(n) for n in df_out["Channel"]])
+            df_out["Sum of Spends"] = np.round(spends, 2)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                roi = np.where(spends > 0, df_out["Total Contrib"].values / spends, np.nan)
+            df_out["ROI"] = np.round(roi, 4)
+
+        return df_out, pos_sum, neg_sum
+
     t1, t2 = st.columns(2)
     with t1:
         st.markdown("#### Short-Term Contribution Summary")
-        sv = totals_st.values; sv_tot = sv.sum() + 1e-12
-        df_st = pd.DataFrame({
-            "Channel": [c.replace("ShortTerm_", "") for c in short_cols],
-            "Total Contrib": sv.round(2),
-            "Share (%)": (sv / sv_tot * 100).round(1),
-        }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
-        df_st.insert(0, "Rank", range(1, len(df_st)+1))
-        st.dataframe(df_st, use_container_width=True, hide_index=True)
+        df_st, pos_st, neg_st = _contribution_table(totals_st, "ShortTerm_", with_roi=True)
+        st.dataframe(
+            df_st.style.format({
+                "Sum of Spends": "{:,.2f}",
+                "ROI":            "{:,.4f}",
+            }, na_rep="—"),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "💲 **Sum of Spends** and **ROI** are only shown for variables mapped in "
+            "**Tab 4 · A2 · Spend Mapping**; other rows (Intercept, non-media, price) show `—`."
+        )
+        check_st = pos_st + neg_st
+        c1s, c2s, c3s = st.columns(3)
+        c1s.metric("Positive pool", f"{pos_st:,.2f}")
+        c2s.metric("Negative pool", f"{neg_st:,.2f}")
+        c3s.metric("Net", f"{check_st:,.2f}")
+        st.caption("✅ Positive shares sum to **+100 %** · Negative shares sum to **−100 %**")
     with t2:
         st.markdown("#### Long-Term Contribution Summary")
-        lv = totals_lt.values; lv_abs = np.abs(lv); lv_tot = lv_abs.sum() + 1e-12
-        df_lt = pd.DataFrame({
-            "Channel": [c.replace("LongTerm_", "") for c in long_cols],
-            "Total Contrib": lv.round(2),
-            "Share (%)": (lv_abs / lv_tot * 100).round(1),
-        }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
-        df_lt.insert(0, "Rank", range(1, len(df_lt)+1))
+        df_lt, pos_lt, neg_lt = _contribution_table(totals_lt, "LongTerm_")
         st.dataframe(df_lt, use_container_width=True, hide_index=True)
+        check_lt = pos_lt + neg_lt
+        c1l, c2l, c3l = st.columns(3)
+        c1l.metric("Positive pool", f"{pos_lt:,.2f}")
+        c2l.metric("Negative pool", f"{neg_lt:,.2f}")
+        c3l.metric("Net", f"{check_lt:,.2f}")
+        st.caption("✅ Positive shares sum to **+100 %** · Negative shares sum to **−100 %**")
 
     # FIX: cross-media synergy contributions (configured in Tab 4 ·
     # Section C) were computed by the filter and present in contrib_df
@@ -112,11 +186,23 @@ def render_tab6():
         totals_syn = contrib_df[synergy_cols].sum()
         syn_vals = totals_syn.values
         syn_tot  = np.abs(syn_vals).sum() + 1e-12
+        syn_abs_vals  = np.abs(syn_vals)
+        syn_total_abs = syn_abs_vals.sum()
+        if syn_total_abs < 1e-12:
+            syn_shares = np.zeros_like(syn_vals)
+        else:
+            syn_raw_pct     = syn_abs_vals / syn_total_abs * 100
+            syn_pos_raw_sum = syn_raw_pct[syn_vals > 0].sum()
+            syn_shares = np.where(
+                syn_vals >= 0,
+                np.where(syn_pos_raw_sum > 1e-12, syn_raw_pct / syn_pos_raw_sum * 100, 0.0),
+                -syn_raw_pct,
+            )
         df_syn = pd.DataFrame({
-            "Synergy Pair": [c.replace("Synergy_", "").replace("_from_", " ← from ")
+            "Synergy Pair": [c.replace("Synergy_", "").replace("_from_", " <- from ")
                               for c in synergy_cols],
             "Total Contrib": syn_vals.round(2),
-            "Share (%)": (np.abs(syn_vals) / syn_tot * 100).round(1),
+            "Share (%)": np.round(syn_shares, 1),
         }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
         df_syn.insert(0, "Rank", range(1, len(df_syn)+1))
         st.dataframe(df_syn, use_container_width=True, hide_index=True)
@@ -132,24 +218,41 @@ def render_tab6():
     else:
         st.caption("No cross-media synergy pairs were configured in Tab 4 · Section C.")
 
-    with st.expander("📊 Pie Charts"):
+    with st.expander("📊 Pie Charts — Positive Contributions Only"):
+        st.caption(
+            "Pie charts show only **positive** contributions (share of positive pool = 100%). "
+            "Negative channels (competitor, price) are excluded from pies — they are shown "
+            "in the summary tables above with negative share %."
+        )
         pc1, pc2 = st.columns(2)
         with pc1:
-            fig_pie_st = px.pie(
-                values=np.maximum(totals_st.values, 0),
-                names=[c.replace("ShortTerm_", "") for c in short_cols],
-                title="Short-term share",
-                color_discrete_sequence=px.colors.sequential.Blues_r,
-            )
-            st.plotly_chart(fig_pie_st, use_container_width=True)
+            st_names  = [c.replace("ShortTerm_", "") for c in short_cols]
+            st_vals   = totals_st.values
+            pos_mask  = st_vals > 0
+            if pos_mask.any():
+                fig_pie_st = px.pie(
+                    values=st_vals[pos_mask],
+                    names=[n for n, m in zip(st_names, pos_mask) if m],
+                    title="Short-term positive share",
+                    color_discrete_sequence=px.colors.sequential.Blues_r,
+                )
+                st.plotly_chart(fig_pie_st, use_container_width=True)
+            else:
+                st.info("No positive short-term contributions.")
         with pc2:
-            fig_pie_lt = px.pie(
-                values=np.abs(totals_lt.values),
-                names=[c.replace("LongTerm_", "") for c in long_cols],
-                title="Long-term share",
-                color_discrete_sequence=px.colors.sequential.Greens_r,
-            )
-            st.plotly_chart(fig_pie_lt, use_container_width=True)
+            lt_names  = [c.replace("LongTerm_", "") for c in long_cols]
+            lt_vals   = totals_lt.values
+            pos_mask_lt = lt_vals > 0
+            if pos_mask_lt.any():
+                fig_pie_lt = px.pie(
+                    values=lt_vals[pos_mask_lt],
+                    names=[n for n, m in zip(lt_names, pos_mask_lt) if m],
+                    title="Long-term positive share",
+                    color_discrete_sequence=px.colors.sequential.Greens_r,
+                )
+                st.plotly_chart(fig_pie_lt, use_container_width=True)
+            else:
+                st.info("No positive long-term contributions.")
 
     fig_st_area = px.area(
         contrib_df.reset_index(), x=x_axis, y=short_cols,
@@ -248,6 +351,7 @@ def render_tab6():
     st.markdown("### H · Response Curves")
     params       = res["params"]
     media_list   = config["media"]
+    adstock_type = config["adstock_type"]
 
     if not media_list:
         st.info("No media channels configured.")
@@ -267,11 +371,22 @@ def render_tab6():
         beta_p75 = float(np.percentile(res["x_smooth"][:, idx+1], 75))
         n_v = params["n_params"][idx]; S_v = params["S_params"][idx]
 
-        # Hill is applied directly to raw media spend (adstock has been
-        # removed from the model entirely), so the response curve's
-        # x-axis is raw spend with no carry-over scaling applied.
+        transform_type = g.get("TRANSFORM_TYPE", "hill")
+        if adstock_type == "weibull":
+            from modules.transforms import weibull_lag_weights
+            ak = params["adstock_shape"][idx]; al = params["adstock_scale"][idx]
+            n_lags = int(params.get("adstock_n_lags", 8))
+            w_lags = weibull_lag_weights(ak, al, n_lags)
+            am = w_lags.max()
+            adstock_label = f"Weibull (k={ak:.3f}, λ={al:.3f}, L={n_lags})"
+        else:
+            lam = params["adstock_lambda"][idx]
+            am  = 1.0 / (1.0 - lam + 1e-8)
+            adstock_label = f"Instant / Nerlove-Arrow (λ={lam:.3f})"
+
         def make_resp(b):
-            return np.array([b * hill_transform(x, n_v, S_v) for x in x_range])
+            return np.array([b * apply_transformation(
+                np.array([x]), transform_type, n_v, S_v)[0] for x in x_range])
 
         resp_med = make_resp(beta_med)
         resp_p25 = make_resp(beta_p25)
@@ -284,58 +399,80 @@ def render_tab6():
         mean_v = col_data.mean()
         def resp_at(v): return float(np.interp(v, x_range, resp_med))
 
-        fig_rc = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.65, 0.35],
-                                subplot_titles=[
-                                    f"Total Response — {sel}  (β median={beta_med:.4f})",
-                                    "Marginal Response"],
-                                vertical_spacing=0.08)
+        # ── Simple clean response curve (dark theme) ─────────────────
+        fig_rc = go.Figure()
 
         if show_ci:
             fig_rc.add_trace(go.Scatter(
                 x=np.concatenate([x_range, x_range[::-1]]),
                 y=np.concatenate([resp_p75, resp_p25[::-1]]),
-                fill="toself", fillcolor="rgba(59,130,246,0.15)",
-                line=dict(color="rgba(0,0,0,0)"), name="β 25–75th band",
-            ), row=1, col=1)
+                fill="toself", fillcolor="rgba(99,179,237,0.15)",
+                line=dict(color="rgba(0,0,0,0)"), showlegend=False,
+            ))
 
-        fig_rc.add_trace(go.Scatter(x=x_range, y=resp_med, mode="lines",
-                                     name="Response (β median)",
-                                     line=dict(color="#1e40af", width=3)), row=1, col=1)
+        fig_rc.add_trace(go.Scatter(
+            x=x_range, y=resp_med, mode="lines",
+            line=dict(color="#3b82f6", width=3),
+            showlegend=False,
+        ))
 
-        for pv, pn, clr in [
-            (pct_10, "P10", "#94a3b8"), (mean_v, "Mean", "#f59e0b"),
-            (pct_50, "Median", "#10b981"), (pct_90, "P90", "#ef4444"),
-        ]:
+        marker_specs = [
+            (pct_10, "Min",    "#10b981"),
+            (mean_v, "Avg",    "#f59e0b"),
+            (pct_50, "Median", "#a855f7"),
+            (pct_90, "Max",    "#ef4444"),
+        ]
+        for pv, pn, clr in marker_specs:
             if 0 < pv <= x_max:
-                fig_rc.add_vline(x=pv, line_dash="dot", line_color=clr, line_width=1.5,
-                                  annotation_text=pn, annotation_font_size=10, row=1, col=1)
+                rv = resp_at(pv)
                 fig_rc.add_trace(go.Scatter(
-                    x=[pv], y=[resp_at(pv)], mode="markers",
-                    marker=dict(color=clr, size=9),
-                    name=f"{pn} → {resp_at(pv):,.2f}"), row=1, col=1)
+                    x=[pv], y=[rv], mode="markers+text",
+                    marker=dict(color=clr, size=13,
+                                line=dict(color="white", width=1.5)),
+                    text=[f"<b>{pn}<br>{pv:.1f}</b>"],
+                    textposition="top center",
+                    textfont=dict(size=10, color="white"),
+                    showlegend=False,
+                ))
 
-        fig_rc.add_trace(go.Scatter(x=x_range, y=marginal, mode="lines", name="Marginal",
-                                     line=dict(color="#7c3aed", width=2)), row=2, col=1)
-        fig_rc.add_hline(y=0, line_dash="dash", line_color="#94a3b8", row=2, col=1)
-        fig_rc.update_xaxes(title_text="Spend / Input", row=2, col=1)
-        fig_rc.update_yaxes(title_text="KPI Contribution", row=1, col=1)
-        fig_rc.update_yaxes(title_text="dKPI / dSpend", row=2, col=1)
-        fig_rc.update_layout(height=620, template="plotly_white",
-                              legend=dict(orientation="h", y=1.08, x=0))
+        fig_rc.update_layout(
+            title=dict(
+                text=f"Response Curve: {sel}  ·  beta = {beta_med:.6f}",
+                font=dict(color="white", size=14), x=0.5,
+            ),
+            paper_bgcolor="#1e293b", plot_bgcolor="#1e293b",
+            font=dict(color="#cbd5e1"),
+            xaxis=dict(
+                title=f"Input - {sel}",
+                gridcolor="#334155", zerolinecolor="#334155",
+            ),
+            yaxis=dict(
+                title="Response (KPI per unit Input)",
+                gridcolor="#334155", zerolinecolor="#334155",
+            ),
+            height=460,
+            margin=dict(t=60, b=60, l=70, r=30),
+        )
         st.plotly_chart(fig_rc, use_container_width=True)
 
+        # Parameter summary
         pc = st.columns(6)
-        pc[0].metric("β median", f"{beta_med:.4f}")
-        pc[1].metric("β P25",    f"{beta_p25:.4f}")
-        pc[2].metric("β P75",    f"{beta_p75:.4f}")
-        pc[3].metric("Hill n",   f"{n_v:.3f}")
-        pc[4].metric("Hill S",   f"{S_v:.3f}")
-        if adstock_type == "weibull":
-            pc[5].metric("Weibull α/θ",
-                         f"{params['adstock_alpha'][idx]:.3f}/{params['adstock_theta'][idx]:.3f}")
+        pc[0].metric("beta median", f"{beta_med:.4f}")
+        pc[1].metric("beta P25",    f"{beta_p25:.4f}")
+        pc[2].metric("beta P75",    f"{beta_p75:.4f}")
+        transform_type_label = g.get("TRANSFORM_TYPE", "hill")
+        if transform_type_label == "hill":
+            pc[3].metric("Hill n", f"{n_v:.3f}")
+            pc[4].metric("Hill S", f"{S_v:.3f}")
         else:
-            pc[5].metric("NA λ", f"{params['adstock_lambda'][idx]:.3f}")
-        st.caption(f"Adstock: **{adstock_label}** · Steady-state multiplier: **{am:.3f}×**")
+            pc[3].metric("Power n", f"{n_v:.3f}")
+            pc[4].metric("", "")
+        if adstock_type == "weibull":
+            pc[5].metric("Weibull k/lam",
+                         f"{params['adstock_shape'][idx]:.3f}/{params['adstock_scale'][idx]:.3f}")
+        else:
+            pc[5].metric("Instant lam", f"{params['adstock_lambda'][idx]:.3f}")
+        st.caption(f"Adstock: **{adstock_label}**")
 
         pcb = config.get("per_channel_bounds", {}).get(sel, {})
         if pcb:
