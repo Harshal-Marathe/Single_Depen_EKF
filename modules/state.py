@@ -11,9 +11,6 @@ _defaults = {
     "config": None,
     "model_results": None,
     "model_fitted": False,
-    "model_results_2": None,   # second dependent variable (same equation, e.g. ToM/Consideration)
-    "model_fitted_2": False,
-    "_last_uploaded_file_id": None,  # (name, size) of last processed upload — see tab1
 }
 
 

@@ -12,41 +12,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from modules.ui_helpers import section, need_model
-from modules.transforms import hill_transform, power_transform, apply_transformation
-from modules.exports import build_betas_df, build_master_workbook_bytes
+from modules.transforms import hill_transform
 
 
 def render_tab6():
     section("06", "Results & ROI Analytics")
     if not st.session_state.model_fitted: need_model()
 
+    res    = st.session_state.model_results
     config = st.session_state.config
     df     = st.session_state.df
-
-    has_dep2 = bool(st.session_state.get("model_fitted_2") and st.session_state.get("model_results_2"))
-    if has_dep2:
-        dep_choice = st.radio(
-            "📊 Viewing results for:",
-            [f"Dependent 1 · {config['target']}", f"Dependent 2 · {config.get('target2')} (joint bivariate fit)"],
-            horizontal=True, key="tab6_dep_choice",
-        )
-        if dep_choice.startswith("Dependent 2"):
-            res = st.session_state.model_results_2
-            target = config.get("target2")
-        else:
-            res = st.session_state.model_results
-            target = config["target"]
-        if res.get("joint_fit"):
-            st.caption(
-                f"🔗 Jointly fitted with a bivariate Kalman filter · "
-                f"ρ(Dep1, Dep2) = **{res['rho_y']:.3f}** · "
-                f"joint log-likelihood = **{res['joint_loglik']:.2f}**"
-            )
-        st.divider()
-    else:
-        res    = st.session_state.model_results
-        target = config["target"]
-    g = res["g"]
+    target = config["target"]; g = res["g"]
 
     st.markdown("### A · Model Performance")
     c1, c2, c3, c4 = st.columns(4)
@@ -102,151 +78,52 @@ def render_tab6():
     totals_st  = contrib_df[short_cols].sum()
     totals_lt  = contrib_df[long_cols].sum()
 
-    def _contribution_table(totals, prefix):
-        """
-        Share % logic:
-        1. raw_pct_i = |value_i| / sum(|all values|) * 100
-        2. Positives: scale so they sum to 100  =>  raw_pct_i / sum(raw_pct of positives) * 100
-        3. Negatives: keep as negative raw_pct  =>  -raw_pct_i
-        Result: positive shares sum to +100%, negatives are their true negative weight.
-        """
-        names  = [c.replace(prefix, "") for c in totals.index]
-        values = totals.values.astype(float)
-
-        abs_vals  = np.abs(values)
-        total_abs = abs_vals.sum()
-
-        if total_abs < 1e-12:
-            shares = np.zeros_like(values)
-        else:
-            raw_pct     = abs_vals / total_abs * 100
-            pos_raw_sum = raw_pct[values > 0].sum()
-            shares = np.where(
-                values >= 0,
-                np.where(pos_raw_sum > 1e-12, raw_pct / pos_raw_sum * 100, 0.0),
-                -raw_pct,
-            )
-
-        pos_sum = values[values > 0].sum()
-        neg_sum = values[values < 0].sum()
-
-        df_out = pd.DataFrame({
-            "Channel":       names,
-            "Total Contrib": np.round(values, 2),
-            "Share (%)":     np.round(shares, 1),
-        }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
-        df_out.insert(0, "Rank", range(1, len(df_out)+1))
-        return df_out, pos_sum, neg_sum
-
     t1, t2 = st.columns(2)
     with t1:
         st.markdown("#### Short-Term Contribution Summary")
-        df_st, pos_st, neg_st = _contribution_table(totals_st, "ShortTerm_")
+        sv = totals_st.values; sv_tot = sv.sum() + 1e-12
+        df_st = pd.DataFrame({
+            "Channel": [c.replace("ShortTerm_", "") for c in short_cols],
+            "Total Contrib": sv.round(2),
+            "Share (%)": (sv / sv_tot * 100).round(1),
+        }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
+        df_st.insert(0, "Rank", range(1, len(df_st)+1))
         st.dataframe(df_st, use_container_width=True, hide_index=True)
-        check_st = pos_st + neg_st
-        c1s, c2s, c3s = st.columns(3)
-        c1s.metric("Positive pool", f"{pos_st:,.2f}")
-        c2s.metric("Negative pool", f"{neg_st:,.2f}")
-        c3s.metric("Net", f"{check_st:,.2f}")
-        st.caption("✅ Positive shares sum to **+100 %** · Negative shares sum to **−100 %**")
     with t2:
         st.markdown("#### Long-Term Contribution Summary")
-        df_lt, pos_lt, neg_lt = _contribution_table(totals_lt, "LongTerm_")
-        st.dataframe(df_lt, use_container_width=True, hide_index=True)
-        check_lt = pos_lt + neg_lt
-        c1l, c2l, c3l = st.columns(3)
-        c1l.metric("Positive pool", f"{pos_lt:,.2f}")
-        c2l.metric("Negative pool", f"{neg_lt:,.2f}")
-        c3l.metric("Net", f"{check_lt:,.2f}")
-        st.caption("✅ Positive shares sum to **+100 %** · Negative shares sum to **−100 %**")
-
-    # FIX: cross-media synergy contributions (configured in Tab 4 ·
-    # Section C) were computed by the filter and present in contrib_df
-    # (see pipeline.py) but nothing in this tab ever read out the
-    # Synergy_ columns — they were invisible in the UI even though the
-    # numbers existed. Adding a dedicated summary here.
-    synergy_cols = [c for c in contrib_df.columns if c.startswith("Synergy_")]
-    if synergy_cols:
-        st.markdown("#### 🔗 Cross-Media Synergy Contribution Summary")
-        totals_syn = contrib_df[synergy_cols].sum()
-        syn_vals = totals_syn.values
-        syn_tot  = np.abs(syn_vals).sum() + 1e-12
-        syn_abs_vals  = np.abs(syn_vals)
-        syn_total_abs = syn_abs_vals.sum()
-        if syn_total_abs < 1e-12:
-            syn_shares = np.zeros_like(syn_vals)
-        else:
-            syn_raw_pct     = syn_abs_vals / syn_total_abs * 100
-            syn_pos_raw_sum = syn_raw_pct[syn_vals > 0].sum()
-            syn_shares = np.where(
-                syn_vals >= 0,
-                np.where(syn_pos_raw_sum > 1e-12, syn_raw_pct / syn_pos_raw_sum * 100, 0.0),
-                -syn_raw_pct,
-            )
-        df_syn = pd.DataFrame({
-            "Synergy Pair": [c.replace("Synergy_", "").replace("_from_", " <- from ")
-                              for c in synergy_cols],
-            "Total Contrib": syn_vals.round(2),
-            "Share (%)": np.round(syn_shares, 1),
+        lv = totals_lt.values; lv_abs = np.abs(lv); lv_tot = lv_abs.sum() + 1e-12
+        df_lt = pd.DataFrame({
+            "Channel": [c.replace("LongTerm_", "") for c in long_cols],
+            "Total Contrib": lv.round(2),
+            "Share (%)": (lv_abs / lv_tot * 100).round(1),
         }).sort_values("Total Contrib", ascending=False).reset_index(drop=True)
-        df_syn.insert(0, "Rank", range(1, len(df_syn)+1))
-        st.dataframe(df_syn, use_container_width=True, hide_index=True)
+        df_lt.insert(0, "Rank", range(1, len(df_lt)+1))
+        st.dataframe(df_lt, use_container_width=True, hide_index=True)
 
-        fig_syn = px.bar(
-            df_syn.sort_values("Total Contrib"),
-            x="Total Contrib", y="Synergy Pair", orientation="h",
-            title="Cross-Media Synergy Contribution by Pair",
-            color="Total Contrib", color_continuous_scale="Purples",
-        )
-        fig_syn.update_layout(height=max(300, 45*len(synergy_cols)), template="plotly_white")
-        st.plotly_chart(fig_syn, use_container_width=True)
-    else:
-        st.caption("No cross-media synergy pairs were configured in Tab 4 · Section C.")
-
-    with st.expander("📊 Pie Charts — Positive Contributions Only"):
-        st.caption(
-            "Pie charts show only **positive** contributions (share of positive pool = 100%). "
-            "Negative channels (competitor, price) are excluded from pies — they are shown "
-            "in the summary tables above with negative share %."
-        )
+    with st.expander("📊 Pie Charts"):
         pc1, pc2 = st.columns(2)
         with pc1:
-            st_names  = [c.replace("ShortTerm_", "") for c in short_cols]
-            st_vals   = totals_st.values
-            pos_mask  = st_vals > 0
-            if pos_mask.any():
-                fig_pie_st = px.pie(
-                    values=st_vals[pos_mask],
-                    names=[n for n, m in zip(st_names, pos_mask) if m],
-                    title="Short-term positive share",
-                    color_discrete_sequence=px.colors.sequential.Blues_r,
-                )
-                st.plotly_chart(fig_pie_st, use_container_width=True)
-            else:
-                st.info("No positive short-term contributions.")
+            fig_pie_st = px.pie(
+                values=np.maximum(totals_st.values, 0),
+                names=[c.replace("ShortTerm_", "") for c in short_cols],
+                title="Short-term share",
+                color_discrete_sequence=px.colors.sequential.Blues_r,
+            )
+            st.plotly_chart(fig_pie_st, use_container_width=True)
         with pc2:
-            lt_names  = [c.replace("LongTerm_", "") for c in long_cols]
-            lt_vals   = totals_lt.values
-            pos_mask_lt = lt_vals > 0
-            if pos_mask_lt.any():
-                fig_pie_lt = px.pie(
-                    values=lt_vals[pos_mask_lt],
-                    names=[n for n, m in zip(lt_names, pos_mask_lt) if m],
-                    title="Long-term positive share",
-                    color_discrete_sequence=px.colors.sequential.Greens_r,
-                )
-                st.plotly_chart(fig_pie_lt, use_container_width=True)
-            else:
-                st.info("No positive long-term contributions.")
+            fig_pie_lt = px.pie(
+                values=np.abs(totals_lt.values),
+                names=[c.replace("LongTerm_", "") for c in long_cols],
+                title="Long-term share",
+                color_discrete_sequence=px.colors.sequential.Greens_r,
+            )
+            st.plotly_chart(fig_pie_lt, use_container_width=True)
 
-    _cplot = contrib_df.copy().reset_index(drop=True)
-    _cplot["_period"] = np.arange(len(_cplot))
     fig_st_area = px.area(
-        _cplot, x="_period", y=short_cols,
+        contrib_df.reset_index(), x=x_axis, y=short_cols,
         title="Short-term Contributions Over Time",
         color_discrete_sequence=px.colors.qualitative.Bold,
     )
-    fig_st_area.update_xaxes(title_text="Period")
     fig_st_area.update_layout(height=400, template="plotly_white")
     st.plotly_chart(fig_st_area, use_container_width=True)
 
@@ -254,57 +131,6 @@ def render_tab6():
         st.dataframe(contrib_df.style.format("{:,.4f}"), use_container_width=True)
     st.download_button("📥 Download Contribution Table",
                        contrib_df.to_csv().encode(), "contributions.csv", "text/csv")
-
-    st.markdown("### E2 · Synergy / Cross-Media Effects")
-    synergy_df = res.get("synergy_df")
-    synergy_cols = [c for c in contrib_df.columns if c.startswith("Synergy_")]
-    if synergy_df is None or synergy_df.empty or not synergy_cols:
-        st.info(
-            "No cross-media synergy relationships are configured for this model. "
-            "Set them up in **Tab 4 · Section C (Cross-media Learning)** and re-run."
-        )
-    else:
-        st.caption(
-            "One row per configured source → target relationship "
-            "(per-variable level, not a single aggregated number)."
-        )
-        st.dataframe(
-            synergy_df.style.format({
-                "Total Synergy Contribution": "{:,.4f}",
-                "Avg Synergy / Period":       "{:,.4f}",
-                "Cross Delta":                "{:.4f}",
-                "Cross Hill n":                "{:.3f}",
-                "Cross Hill S":                "{:.3f}",
-                "Share of Target's Total Contrib (%)": "{:.2f}",
-            }),
-            use_container_width=True, hide_index=True,
-        )
-        st.download_button("📥 Download Synergy Table",
-                           synergy_df.to_csv(index=False).encode(),
-                           "synergy_table.csv", "text/csv")
-
-        pair_labels = [f"{row['Source Channel']} → {row['Target Channel']}"
-                        for _, row in synergy_df.iterrows()]
-        fig_syn_bar = px.bar(
-            x=synergy_df["Total Synergy Contribution"].values, y=pair_labels,
-            orientation="h", title="Total Synergy Contribution by Pair",
-            labels={"x": "Total Contribution", "y": ""},
-            color=synergy_df["Total Synergy Contribution"].values,
-            color_continuous_scale="Purples",
-        )
-        fig_syn_bar.update_layout(height=max(300, 50*len(pair_labels)), template="plotly_white")
-        st.plotly_chart(fig_syn_bar, use_container_width=True)
-
-        _cplot_syn = contrib_df.copy().reset_index(drop=True)
-        _cplot_syn["_period"] = np.arange(len(_cplot_syn))
-        fig_syn_area = px.area(
-            _cplot_syn, x="_period", y=synergy_cols,
-            title="Synergy Contributions Over Time (per pair)",
-            color_discrete_sequence=px.colors.qualitative.Vivid,
-        )
-        fig_syn_area.update_xaxes(title_text="Period")
-        fig_syn_area.update_layout(height=380, template="plotly_white")
-        st.plotly_chart(fig_syn_area, use_container_width=True)
 
     st.markdown("### F · Estimated Parameters")
     param_df = res["param_df"]
@@ -341,8 +167,8 @@ def render_tab6():
 
     st.markdown("### H · Response Curves")
     params       = res["params"]
-    media_list   = g["MEDIA_COLS"]
-    adstock_type = g["ADSTOCK_TYPE"]
+    media_list   = config["media"]
+    adstock_type = config["adstock_type"]
 
     if not media_list:
         st.info("No media channels configured.")
@@ -362,21 +188,19 @@ def render_tab6():
         beta_p75 = float(np.percentile(res["x_smooth"][:, idx+1], 75))
         n_v = params["n_params"][idx]; S_v = params["S_params"][idx]
 
-        transform_type = g.get("TRANSFORM_TYPE", "hill")
         if adstock_type == "weibull":
-            from modules.transforms import weibull_lag_weights
-            ak = params["adstock_shape"][idx]; al = params["adstock_scale"][idx]
-            n_lags = int(params.get("adstock_n_lags", 8))
-            w_lags = weibull_lag_weights(ak, al, n_lags)
-            am = w_lags.max()
-            adstock_label = f"Weibull (k={ak:.3f}, λ={al:.3f}, L={n_lags})"
+            aw = params["adstock_alpha"][idx]; tw = params["adstock_theta"][idx]
+            t_w = np.arange(1, 53, dtype=float)
+            ker = (aw/tw) * ((t_w/tw)**(aw-1)) * np.exp(-((t_w/tw)**aw))
+            ker /= (ker.sum() + 1e-12)
+            am = ker.max(); adstock_label = f"Weibull (α={aw:.3f}, θ={tw:.3f})"
         else:
-            ls_v = params["Ls"][idx]
-            adstock_label = f"Instant / Nerlove-Arrow (no separate λ — carryover via Ls={ls_v:.3f})"
+            lam = params["adstock_lambda"][idx]
+            am  = 1.0 / (1.0 - lam + 1e-8)
+            adstock_label = f"Nerlove-Arrow (λ={lam:.3f})"
 
         def make_resp(b):
-            return np.array([b * apply_transformation(
-                np.array([x]), transform_type, n_v, S_v)[0] for x in x_range])
+            return np.array([b * hill_transform(x * am, n_v, S_v) for x in x_range])
 
         resp_med = make_resp(beta_med)
         resp_p25 = make_resp(beta_p25)
@@ -389,83 +213,60 @@ def render_tab6():
         mean_v = col_data.mean()
         def resp_at(v): return float(np.interp(v, x_range, resp_med))
 
-        # ── Simple clean response curve (dark theme) ─────────────────
-        fig_rc = go.Figure()
+        fig_rc = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.65, 0.35],
+                                subplot_titles=[
+                                    f"Total Response — {sel}  (β median={beta_med:.4f})",
+                                    "Marginal Response"],
+                                vertical_spacing=0.08)
 
         if show_ci:
             fig_rc.add_trace(go.Scatter(
                 x=np.concatenate([x_range, x_range[::-1]]),
                 y=np.concatenate([resp_p75, resp_p25[::-1]]),
-                fill="toself", fillcolor="rgba(99,179,237,0.15)",
-                line=dict(color="rgba(0,0,0,0)"), showlegend=False,
-            ))
+                fill="toself", fillcolor="rgba(59,130,246,0.15)",
+                line=dict(color="rgba(0,0,0,0)"), name="β 25–75th band",
+            ), row=1, col=1)
 
-        fig_rc.add_trace(go.Scatter(
-            x=x_range, y=resp_med, mode="lines",
-            line=dict(color="#3b82f6", width=3),
-            showlegend=False,
-        ))
+        fig_rc.add_trace(go.Scatter(x=x_range, y=resp_med, mode="lines",
+                                     name="Response (β median)",
+                                     line=dict(color="#1e40af", width=3)), row=1, col=1)
 
-        marker_specs = [
-            (pct_10, "Min",    "#10b981"),
-            (mean_v, "Avg",    "#f59e0b"),
-            (pct_50, "Median", "#a855f7"),
-            (pct_90, "Max",    "#ef4444"),
-        ]
-        for pv, pn, clr in marker_specs:
+        for pv, pn, clr in [
+            (pct_10, "P10", "#94a3b8"), (mean_v, "Mean", "#f59e0b"),
+            (pct_50, "Median", "#10b981"), (pct_90, "P90", "#ef4444"),
+        ]:
             if 0 < pv <= x_max:
-                rv = resp_at(pv)
+                fig_rc.add_vline(x=pv, line_dash="dot", line_color=clr, line_width=1.5,
+                                  annotation_text=pn, annotation_font_size=10, row=1, col=1)
                 fig_rc.add_trace(go.Scatter(
-                    x=[pv], y=[rv], mode="markers+text",
-                    marker=dict(color=clr, size=13,
-                                line=dict(color="white", width=1.5)),
-                    text=[f"<b>{pn}<br>{pv:.1f}</b>"],
-                    textposition="top center",
-                    textfont=dict(size=10, color="white"),
-                    showlegend=False,
-                ))
+                    x=[pv], y=[resp_at(pv)], mode="markers",
+                    marker=dict(color=clr, size=9),
+                    name=f"{pn} → {resp_at(pv):,.2f}"), row=1, col=1)
 
-        fig_rc.update_layout(
-            title=dict(
-                text=f"Response Curve: {sel}  ·  beta = {beta_med:.6f}",
-                font=dict(color="white", size=14), x=0.5,
-            ),
-            paper_bgcolor="#1e293b", plot_bgcolor="#1e293b",
-            font=dict(color="#cbd5e1"),
-            xaxis=dict(
-                title=f"Input - {sel}",
-                gridcolor="#334155", zerolinecolor="#334155",
-            ),
-            yaxis=dict(
-                title="Response (KPI per unit Input)",
-                gridcolor="#334155", zerolinecolor="#334155",
-            ),
-            height=460,
-            margin=dict(t=60, b=60, l=70, r=30),
-        )
+        fig_rc.add_trace(go.Scatter(x=x_range, y=marginal, mode="lines", name="Marginal",
+                                     line=dict(color="#7c3aed", width=2)), row=2, col=1)
+        fig_rc.add_hline(y=0, line_dash="dash", line_color="#94a3b8", row=2, col=1)
+        fig_rc.update_xaxes(title_text="Spend / Input", row=2, col=1)
+        fig_rc.update_yaxes(title_text="KPI Contribution", row=1, col=1)
+        fig_rc.update_yaxes(title_text="dKPI / dSpend", row=2, col=1)
+        fig_rc.update_layout(height=620, template="plotly_white",
+                              legend=dict(orientation="h", y=1.08, x=0))
         st.plotly_chart(fig_rc, use_container_width=True)
 
-        # Parameter summary
         pc = st.columns(6)
-        pc[0].metric("beta median", f"{beta_med:.4f}")
-        pc[1].metric("beta P25",    f"{beta_p25:.4f}")
-        pc[2].metric("beta P75",    f"{beta_p75:.4f}")
-        transform_type_label = g.get("TRANSFORM_TYPE", "hill")
-        if transform_type_label == "hill":
-            pc[3].metric("Hill n", f"{n_v:.3f}")
-            pc[4].metric("Hill S", f"{S_v:.3f}")
-        else:
-            pc[3].metric("Power n", f"{n_v:.3f}")
-            pc[4].metric("", "")
+        pc[0].metric("β median", f"{beta_med:.4f}")
+        pc[1].metric("β P25",    f"{beta_p25:.4f}")
+        pc[2].metric("β P75",    f"{beta_p75:.4f}")
+        pc[3].metric("Hill n",   f"{n_v:.3f}")
+        pc[4].metric("Hill S",   f"{S_v:.3f}")
         if adstock_type == "weibull":
-            pc[5].metric("Weibull k/lam",
-                         f"{params['adstock_shape'][idx]:.3f}/{params['adstock_scale'][idx]:.3f}")
+            pc[5].metric("Weibull α/θ",
+                         f"{params['adstock_alpha'][idx]:.3f}/{params['adstock_theta'][idx]:.3f}")
         else:
-            pc[5].metric("Ls (persistence)", f"{params['Ls'][idx]:.3f}")
-        st.caption(f"Adstock: **{adstock_label}**")
+            pc[5].metric("NA λ", f"{params['adstock_lambda'][idx]:.3f}")
+        st.caption(f"Adstock: **{adstock_label}** · Steady-state multiplier: **{am:.3f}×**")
 
-        pcb_key = "per_channel_bounds_2" if (has_dep2 and dep_choice.startswith("Dependent 2")) else "per_channel_bounds"
-        pcb = config.get(pcb_key, {}).get(sel, {})
+        pcb = config.get("per_channel_bounds", {}).get(sel, {})
         if pcb:
             st.markdown("#### Per-Variable Bounds Applied")
             st.dataframe(
@@ -475,41 +276,3 @@ def render_tab6():
                               for k, v in pcb.items()]),
                 use_container_width=True, hide_index=True,
             )
-
-    st.divider()
-    st.markdown("### I · Export Center")
-    info_text = (
-        "Three ways to take results outside the app: just the betas, just the "
-        "hyperparameters, or one structured Excel workbook with everything laid "
-        "out as <b>Raw variables → Transformed variables → Betas → "
-        "Contributions (Beta × Transformed)</b>, plus hyperparameters / ROI / "
-        "synergy on their own sheets."
-    )
-    st.markdown(f'<div class="info-box">{info_text}</div>', unsafe_allow_html=True)
-
-    ec1, ec2, ec3 = st.columns(3)
-    with ec1:
-        betas_df = build_betas_df(res, df)
-        st.download_button(
-            "📥 Download Betas (Time Series)",
-            betas_df.to_csv(index=False).encode(),
-            "betas_timeseries.csv", "text/csv",
-            use_container_width=True,
-        )
-    with ec2:
-        st.download_button(
-            "📥 Download Hyperparameters",
-            param_df.to_csv(index=False).encode(),
-            "hyperparameters.csv", "text/csv",
-            use_container_width=True,
-        )
-    with ec3:
-        export_config = dict(config); export_config["target"] = target
-        workbook_bytes = build_master_workbook_bytes(res, export_config, df)
-        st.download_button(
-            "📊 Download Full Excel Workbook",
-            workbook_bytes,
-            "rainbrain_model_export.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )

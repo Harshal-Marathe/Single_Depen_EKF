@@ -6,7 +6,7 @@ and kicking off the full pipeline.
 import streamlit as st
 
 from modules.ui_helpers import section, info, ng_info, prophet_info, need_data, need_config
-from modules.pipeline import run_multi_dependent_pipeline
+from modules.pipeline import run_full_ekf_pipeline
 
 
 def render_tab5(nevergrad_available: bool):
@@ -23,8 +23,7 @@ def render_tab5(nevergrad_available: bool):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Media channels", len(config["media"]))
     c2.metric("Price vars",     len(config.get("price", [])))
-    combo = f"{config["adstock_type"].title()} × {config.get("transform_type","hill").title()}"
-    c3.metric("Adstock×Transform", combo)
+    c3.metric("Adstock",        config["adstock_type"].replace("_", " ").title())
     c4.metric("Train / Test",   f"{config['n_train']} / {config['n_test']}")
 
     pb_cols = config.get("positive_beta_cols", [])
@@ -39,19 +38,11 @@ def render_tab5(nevergrad_available: bool):
         prophet_info(f"📌 Prophet control variables in model: <b>{', '.join(prophet_in_model)}</b>")
 
     # Validate all config columns exist in df
-    dep2_active = config.get("enable_second_dependent") and config.get("target2")
-    dep2_cols = (
-        config.get("media_2", []) + config.get("non_media_2", []) +
-        config.get("comp_media_2", []) + config.get("comp_nonmedia_2", []) +
-        config.get("price_2", [])
-    ) if dep2_active else []
     missing_cols = [
         col for col in (
             config.get("media", []) + config.get("non_media", []) +
-            config.get("comp_media", []) + config.get("comp_nonmedia", []) +
-            config.get("price", []) + dep2_cols +
-            [config.get("target", "")] +
-            ([config["target2"]] if dep2_active else [])
+            config.get("comp_media", []) + config.get("price", []) +
+            [config.get("target", "")]
         )
         if col and col not in df.columns
     ]
@@ -61,22 +52,6 @@ def render_tab5(nevergrad_available: bool):
             f"`{'`, `'.join(missing_cols)}`. Re-save configuration in Tab 4."
         )
         st.stop()
-
-    if config.get("enable_second_dependent") and config.get("target2"):
-        st.info(
-            f"➕ **Joint (bivariate) mode**: Dependent 1 (`{config['target']}`) and "
-            f"Dependent 2 (`{config['target2']}`) will be fitted **together** in a "
-            f"single bivariate Kalman filter — one optimizer run over both equations' "
-            f"parameters plus the correlation (ρ) between their errors, rather than "
-            f"two separate independent fits."
-        )
-        if config.get("different_predictors_2"):
-            st.caption(
-                f"🔀 Dependent 2 uses its own predictor set: "
-                f"{len(config.get('media_2', []))} media · {len(config.get('non_media_2', []))} non-media · "
-                f"{len(config.get('price_2', []))} price · {len(config.get('comp_media_2', []))} comp-media · "
-                f"{len(config.get('comp_nonmedia_2', []))} comp-non-media."
-            )
 
     st.divider()
     st.markdown("### Optimizer Selection")
@@ -131,57 +106,24 @@ def render_tab5(nevergrad_available: bool):
         with col1: max_iter = st.number_input("Max iterations", 100, 5000, 800, 100)
 
     if st.button("🚀 Run EKF MMM", type="primary", use_container_width=True):
-        joint_mode = bool(config.get("enable_second_dependent") and config.get("target2"))
-        spinner_text = ("Running joint bivariate EKF optimisation… (60–600 s)"
-                         if joint_mode else "Running EKF optimisation… (30–300 s)")
-        with st.spinner(spinner_text):
+        with st.spinner("Running EKF optimisation… (30–300 s depending on optimizer / budget)"):
             try:
-                results_1, results_2 = run_multi_dependent_pipeline(
-                    df, config, max_iter, method, ng_cfg=ng_cfg)
-                st.session_state.model_results   = results_1
-                st.session_state.model_fitted    = True
-                st.session_state.model_results_2 = results_2
-                st.session_state.model_fitted_2  = results_2 is not None
-
+                results = run_full_ekf_pipeline(df, config, max_iter, method, ng_cfg=ng_cfg)
+                st.session_state.model_results = results
+                st.session_state.model_fitted  = True
                 st.success("✅ Model fitted!")
-                st.markdown(f"#### Dependent 1 · `{config['target']}`")
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("MAPE",      f"{results_1['mape']:.2%}")
-                c2.metric("R²",        f"{results_1['r2']:.4f}")
-                c3.metric("Log-Lik",   f"{results_1['loglik']:.1f}")
-                c4.metric("Converged", "Yes ✅" if results_1["success"] else "Partial ⚠️")
-
-                if results_2 is not None:
-                    st.markdown(f"#### Dependent 2 · `{config.get('target2')}` (joint bivariate fit)")
-                    d1, d2, d3, d4 = st.columns(4)
-                    d1.metric("MAPE",      f"{results_2['mape']:.2%}")
-                    d2.metric("R²",        f"{results_2['r2']:.4f}")
-                    d3.metric("Log-Lik",   f"{results_2['loglik']:.1f}")
-                    d4.metric("Converged", "Yes ✅" if results_2["success"] else "Partial ⚠️")
-                    st.info(
-                        f"🔗 Joint bivariate log-likelihood: **{results_2['joint_loglik']:.1f}** · "
-                        f"estimated error correlation ρ(Dep1, Dep2) = **{results_2['rho_y']:.3f}**"
-                    )
+                c1.metric("MAPE",      f"{results['mape']:.2%}")
+                c2.metric("R²",        f"{results['r2']:.4f}")
+                c3.metric("Log-Lik",   f"{results['loglik']:.1f}")
+                c4.metric("Converged", "Yes ✅" if results["success"] else "Partial ⚠️")
             except Exception as e:
                 st.exception(e)
 
     if st.session_state.model_fitted:
         res = st.session_state.model_results; st.divider()
-        st.markdown(f"**Dependent 1 · `{config['target']}`**")
         c1, c2, c3 = st.columns(3)
         c1.metric("MAPE", f"{res['mape']:.2%}")
         c2.metric("R²",   f"{res['r2']:.4f}")
         c3.metric("Log-Lik", f"{res['loglik']:.2f}")
-
-        if st.session_state.get("model_fitted_2") and st.session_state.get("model_results_2"):
-            res2 = st.session_state.model_results_2
-            st.markdown(f"**Dependent 2 · `{config.get('target2')}`** (joint bivariate fit)")
-            e1, e2, e3 = st.columns(3)
-            e1.metric("MAPE", f"{res2['mape']:.2%}")
-            e2.metric("R²",   f"{res2['r2']:.4f}")
-            e3.metric("Log-Lik", f"{res2['loglik']:.2f}")
-            if res2.get("joint_fit"):
-                st.caption(f"ρ(Dep1, Dep2) = {res2['rho_y']:.3f} · joint log-lik = {res2['joint_loglik']:.2f}")
-
-        st.caption("Proceed to **Tab 6** for full results. Use the selector there to "
-                   "switch between Dependent 1 and Dependent 2.")
+        st.caption("Proceed to **Tab 6** for full results.")
