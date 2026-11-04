@@ -123,7 +123,7 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     for k, col in enumerate(g["INTERCEPT_EFFECTORS"]):
         ni_int = params["n_intercept"][k]
         Si_int = params["S_intercept"][k]
-        if col in MEDIA_COLS or col in g["OWN_NONMEDIA_COLS"]:
+        if col in df_full.columns:
             raw = df_full[col].values.astype(float)
             transformed = apply_transformation(raw, TRANSFORM_TYPE, ni_int, Si_int)
             contrib_df[f"LongTerm_{col}"] = params["gamma"][k] * transformed
@@ -180,7 +180,9 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     # ── Parameter table ───────────────────────────────────────────────
     param_rows = []
     for k, col in enumerate(g["INTERCEPT_EFFECTORS"]):
-        effector_kind = "Media" if col in MEDIA_COLS else "Non-media"
+        if col in MEDIA_COLS:                      effector_kind = "Media"
+        elif col in g["OWN_NONMEDIA_COLS"]:        effector_kind = "Non-media"
+        else:                                      effector_kind = "Other"
         param_rows.append({
             "Category": "Intercept Effector", "Variable": f"{col} ({effector_kind})",
             "Parameter": "Gamma (boost coeff.)", "Value": params["gamma"][k],

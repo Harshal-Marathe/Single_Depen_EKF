@@ -429,16 +429,19 @@ def render_tab4():
     c1, c2 = st.columns(2)
     with c1: use_organic = st.checkbox("Organic drift (μ) in intercept state", key="use_organic")
     with c2: use_price   = st.checkbox("Include price effects", value=bool(price_vars), key="use_price")
-    intercept_effector_options = list(media) + list(non_media)
+    # Any numeric column in the dataset (except the target KPI) can boost the
+    # intercept — not just the variables picked as media / non-media above.
+    intercept_effector_options = [c for c in num_cols if c != target]
     intercept_effectors = safe_multiselect(
-        "Intercept effectors (media or non-media/organic variables boosting baseline)",
+        "Intercept effectors (any variable from the data that boosts baseline)",
         options=intercept_effector_options, default=list(media), key="intercept_eff")
-    if any(c in non_media for c in intercept_effectors):
+    if intercept_effectors:
         info(
-            "Non-media effectors now get the <b>same Hill/Power transformation</b> as "
-            "media effectors when boosting the intercept — each gets its own fitted "
-            "exponent (<code>n_intercept</code>) and half-saturation/scale "
-            "(<code>S_intercept</code>), just like a media channel."
+            "Every intercept effector — whether it is a media channel, a non-media "
+            "variable, or any other column from your data — gets the <b>same "
+            "Hill/Power transformation</b> when boosting the intercept, each with its "
+            "own fitted exponent (<code>n_intercept</code>), half-saturation/scale "
+            "(<code>S_intercept</code>) and boost coefficient (<code>gamma</code>)."
         )
 
     if st.button("💾 Save Configuration", type="primary", use_container_width=True):

@@ -188,13 +188,14 @@ def run_kalman_filter(df, params, g):
             adstocked_media[src], params["cross_n"][k], params["cross_S"][k])
 
     # ── Intercept boosts: I_t += Σ γ_k · f(x_k,t; n_k_intercept, S_k_intercept) ──
-    # Media AND non-media effectors both get the configured Hill/Power
-    # transformation, each with its own fitted n_intercept / S_intercept.
+    # ANY dataset column can be an effector (media, non-media, or other);
+    # all get the configured Hill/Power transformation, each with its own
+    # fitted n_intercept / S_intercept.
     intercept_boost = np.zeros(T_len)
     for k, col in enumerate(INTERCEPT_EFFECTORS):
         ni_int = params["n_intercept"][k]
         Si_int = params["S_intercept"][k]
-        if col in MEDIA_COLS or col in OWN_NONMEDIA_COLS:
+        if col in df.columns:
             raw = df[col].values.astype(float)
             intercept_boost += params["gamma"][k] * _transform_media(
                 raw, TRANSFORM_TYPE, ni_int, Si_int)
