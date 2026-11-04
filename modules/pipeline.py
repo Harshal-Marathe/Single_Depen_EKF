@@ -14,6 +14,7 @@ from modules.bounds import _build_theta0_and_bounds
 from modules.optimizer import run_nevergrad_optimizer
 from modules.kalman import (
     run_kalman_filter, rts_smoother, _precompute_adstocked, _build_observation_matrix,
+    _effector_series,
 )
 from modules.transforms import apply_transformation, hill_transform_vec
 
@@ -32,8 +33,27 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
             p = unpack_theta(theta, g)
             _, _, _, _, _, _, _, _, loglik = run_kalman_filter(df_train, p, g)
             return -loglik
-        opt = minimize(objective, theta0, method=method,
-                       bounds=bounds, options={"maxiter": max_iter, "ftol": 1e-9})
+
+        def _fit(x0, bnds):
+            return minimize(objective, x0, method=method, bounds=bnds,
+                            options={"maxiter": max_iter, "ftol": 1e-9})
+
+        N_EFF = g["N_EFFECTORS"]
+        if N_EFF > 0:
+            # Two-stage fit. Stage 1: intercept effectors switched off
+            # (gamma pinned to 0) so every other parameter settles first.
+            # Stage 2: release gamma starting from the stage-1 solution.
+            # Keeping the better of the two guarantees adding effectors
+            # can never fit worse than the no-effector model.
+            gi = g["N_MEDIA"] + 1 + g["N_MEDIA"]          # start of gamma block
+            th1 = theta0.copy(); th1[gi:gi+N_EFF] = 0.0
+            b1 = list(bounds);   b1[gi:gi+N_EFF] = [(0.0, 0.0)] * N_EFF
+            opt1 = _fit(th1, b1)
+            th2 = opt1.x.copy(); th2[gi:gi+N_EFF] = theta0[gi:gi+N_EFF]
+            opt2 = _fit(th2, bounds)
+            opt = opt2 if opt2.fun <= opt1.fun else opt1
+        else:
+            opt = _fit(theta0, bounds)
         best_theta = opt.x; opt_success = opt.success; opt_nit = opt.nit
 
     params = unpack_theta(best_theta, g)
@@ -121,12 +141,9 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         contrib_df[f"LongTerm_{col}"]  = 0.0
 
     for k, col in enumerate(g["INTERCEPT_EFFECTORS"]):
-        ni_int = params["n_intercept"][k]
-        Si_int = params["S_intercept"][k]
         if col in df_full.columns:
-            raw = df_full[col].values.astype(float)
-            transformed = apply_transformation(raw, TRANSFORM_TYPE, ni_int, Si_int)
-            contrib_df[f"LongTerm_{col}"] = params["gamma"][k] * transformed
+            contrib_df[f"LongTerm_{col}"] = params["gamma"][k] * _effector_series(
+                df_full, col, g, params, k)
 
     for k, (tgt, src) in enumerate(g["CROSS_MEDIA_PAIRS"]):
         contrib_df[f"Synergy_{tgt}_from_{src}"] = cross_beta_contrib[:, k]
@@ -193,7 +210,7 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         })
         param_rows.append({
             "Category": "Intercept Effector", "Variable": f"{col} ({effector_kind})",
-            "Parameter": "S_intercept (half-sat / scale)", "Value": params["S_intercept"][k],
+            "Parameter": "S_intercept (half-sat, in units of max(x))", "Value": params["S_intercept"][k],
         })
 
     for i, col in enumerate(MEDIA_COLS):

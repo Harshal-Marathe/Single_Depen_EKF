@@ -134,6 +134,18 @@ def _transform_media(x: np.ndarray, transform_type: str,
     return apply_transformation(x, transform_type, n, S)
 
 
+
+def _effector_series(df, col, g, params, k):
+    """Transformed intercept-effector series f(x/x_ref; n_k, S_k).
+    x_ref is fixed from the train split (stored in g by bounds.py) so the
+    same scaling is used for train and full-sample runs."""
+    xref = g.get("INTERCEPT_XREF", {}).get(col)
+    raw = df[col].values.astype(float)
+    if xref is None:
+        xref = max(float(np.nanmax(np.abs(raw))), 1e-12)
+    return _transform_media(raw / xref, g["TRANSFORM_TYPE"],
+                            params["n_intercept"][k], params["S_intercept"][k])
+
 # ── Main Kalman filter ───────────────────────────────────────────────────────
 
 def run_kalman_filter(df, params, g):
@@ -193,12 +205,8 @@ def run_kalman_filter(df, params, g):
     # fitted n_intercept / S_intercept.
     intercept_boost = np.zeros(T_len)
     for k, col in enumerate(INTERCEPT_EFFECTORS):
-        ni_int = params["n_intercept"][k]
-        Si_int = params["S_intercept"][k]
         if col in df.columns:
-            raw = df[col].values.astype(float)
-            intercept_boost += params["gamma"][k] * _transform_media(
-                raw, TRANSFORM_TYPE, ni_int, Si_int)
+            intercept_boost += params["gamma"][k] * _effector_series(df, col, g, params, k)
 
     # ── Weibull weighted-lag arrays for state transition ─────────────
     # When adstock = weibull the β state includes the weighted lag sum;

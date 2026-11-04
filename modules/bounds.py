@@ -42,9 +42,14 @@ def _build_theta0_and_bounds(df, g):
     delta_bounds = [_delta_bound(c) for c in MEDIA_COLS]
     delta_init   = np.full(N_MEDIA, 0.05)
 
-    # gamma bounds (intercept effectors — always positive)
-    gamma_bounds = [(0.0, None)] * N_EFFECTORS
-    gamma_init   = np.full(N_EFFECTORS, 0.02)
+    # gamma bounds (intercept effectors — always positive).
+    # gamma is in TARGET units per period, so it is scaled to the target:
+    # a fixed 0.02 is meaningless for a target in the millions and the
+    # optimizer can't move it. Start small (so the model starts close to
+    # "no boost") and cap the per-period boost at 5% of the target mean.
+    y_scale = max(float(np.nanmean(np.abs(df[g["TARGET_COL"]].values))), 1e-6)
+    gamma_bounds = [(0.0, 0.05 * y_scale)] * N_EFFECTORS
+    gamma_init   = np.full(N_EFFECTORS, 1e-3 * y_scale / max(N_EFFECTORS, 1))
 
     # ── Transformation parameters ─────────────────────────────────────
     if TRANSFORM_TYPE == "power":
@@ -62,7 +67,6 @@ def _build_theta0_and_bounds(df, g):
         S_init   = [safe_median(df[c]) for c in MEDIA_COLS]
 
     # ── Intercept effector exponent ni ───────────────────────────────
-    # Same transform type applies
     if TRANSFORM_TYPE == "power":
         n_int_bounds = [(0.01, 1.0)] * N_EFFECTORS
         n_int_init   = [0.5] * N_EFFECTORS
@@ -71,12 +75,20 @@ def _build_theta0_and_bounds(df, g):
         n_int_init   = [2.0] * N_EFFECTORS
 
     # ── Intercept effector S (half-sat / scale) ──────────────────────
-    # Own dedicated slot per effector (media AND non-media) so non-media
-    # effectors get the same Hill/Power transformation as media ones,
-    # instead of reusing the media channel's own state-equation S.
+    # Effectors are transformed on x / x_ref (x_ref = max |x| on the train
+    # split), so every effector lives on a comparable 0..1 scale and
+    # S_intercept is in units of that scale (not raw units). This keeps
+    # gamma / n / S well-conditioned no matter how large the raw variable is.
     INTERCEPT_EFFECTORS = g.get("INTERCEPT_EFFECTORS", [])
-    S_int_bounds = [(1e-6, 1e8)] * N_EFFECTORS
-    S_int_init   = [safe_median(df[c]) for c in INTERCEPT_EFFECTORS] if N_EFFECTORS else []
+    g["INTERCEPT_XREF"] = {
+        c: max(float(np.nanmax(np.abs(df[c].values.astype(float)))), 1e-12)
+        for c in INTERCEPT_EFFECTORS
+    }
+    S_int_bounds = [(1e-3, 10.0)] * N_EFFECTORS
+    S_int_init   = [
+        float(np.clip(safe_median(df[c] / g["INTERCEPT_XREF"][c], default=0.5), 1e-2, 5.0))
+        for c in INTERCEPT_EFFECTORS
+    ]
 
     # ── Adstock parameters ────────────────────────────────────────────
     all_adstock_cols = list(MEDIA_COLS) + list(COMP_MEDIA_COLS)
