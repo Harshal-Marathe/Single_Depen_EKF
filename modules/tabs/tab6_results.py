@@ -32,15 +32,6 @@ def render_tab6():
     c3.metric("Log-Lik",      f"{res['loglik']:.2f}")
     c4.metric("Observations", len(df))
 
-    _co = res.get("co_info")
-    if _co:
-        st.caption(
-            f"🔁 Cochrane-Orcutt AR(1) correction applied: ρ = {_co['rho']:.3f} "
-            f"({'converged' if _co['converged'] else 'iteration limit reached'} after "
-            f"{_co['n_iter']} iteration(s)). Fitted values, contributions and ROI are on "
-            f"the original (non-differenced) scale."
-        )
-
     st.markdown("### B · Actual vs Predicted")
     x_axis  = np.arange(len(df)); n_train = config["n_train"]
     fig_avp = go.Figure()
