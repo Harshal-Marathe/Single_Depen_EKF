@@ -29,6 +29,7 @@ Intercept (all modes):
 import numpy as np
 import pandas as pd
 
+from modules.cochrane_orcutt import quasi_difference_obs
 from modules.transforms import (
     apply_transformation,
     hill_transform_vec,
@@ -240,6 +241,24 @@ def run_kalman_filter(df, params, g):
     P_filt[0] = P0
     target_vals = df[TARGET_COL].values
 
+    # ── Observation used by the UPDATE step (Cochrane-Orcutt, optional) ──
+    # If g["CO_RHO"] != 0 the update runs on the quasi-differenced equation
+    #   y*_t = y_t - rho*y_{t-1} = (L_t - rho*L_{t-1}) x_t + u_t,
+    # with u_t white noise of variance sigma_y^2. The first observation is
+    # Prais-Winsten scaled (default) or skipped (g["CO_KEEP_FIRST"] False =
+    # classical CO). yhat / residuals returned below stay STRUCTURAL
+    # (L_t · x_pred_t), so MAPE / R² / contributions keep their meaning;
+    # only the state update and loglik use the whitened equation. With
+    # CO_RHO = 0 (default) this is exactly the original filter.
+    # See modules/cochrane_orcutt.py.
+    co_rho = float(g.get("CO_RHO", 0.0) or 0.0)
+    use_co = abs(co_rho) > 1e-12
+    keep_first = bool(g.get("CO_KEEP_FIRST", True))
+    if use_co:
+        y_obs, L_obs = quasi_difference_obs(target_vals, L_mat, co_rho, keep_first=keep_first)
+    else:
+        y_obs, L_obs = target_vals, L_mat
+
     # Positivity / negativity constraint index sets
     positive_cols = set(g.get("POSITIVE_BETA_COLS", []))
     negative_cols = set(g.get("NEGATIVE_BETA_COLS", []))
@@ -320,13 +339,21 @@ def run_kalman_filter(df, params, g):
             x_pred[0] = x_filt[0].copy(); P_pred[0] = P_filt[0].copy()
 
         # ── Kalman update ─────────────────────────────────────────────
-        L_t = L_mat[t]
-        yhat[t]      = L_t @ x_pred[t]
+        # structural fit / residual (what the rest of the app reports)
+        yhat[t]      = L_mat[t] @ x_pred[t]
         residuals[t] = target_vals[t] - yhat[t]
+
+        if use_co and t == 0 and not keep_first:
+            # Classical CO drops the first observation: no update, no likelihood.
+            x_filt[0] = x_pred[0].copy(); P_filt[0] = P_pred[0].copy()
+            continue
+
+        L_t = L_obs[t]
+        v_t = y_obs[t] - L_t @ x_pred[t]          # == residuals[t] when CO is off
         LP  = L_t @ P_pred[t]
         S_t = max(LP @ L_t + R, 1e-8)
         K   = (P_pred[t] @ L_t) / S_t
-        x_filt[t] = x_pred[t] + K * residuals[t]
+        x_filt[t] = x_pred[t] + K * v_t
         for idx in positive_state_idx:
             if x_filt[t, idx] < 0:
                 x_filt[t, idx] = 1e-8
@@ -334,7 +361,7 @@ def run_kalman_filter(df, params, g):
             if x_filt[t, idx] > 0:
                 x_filt[t, idx] = -1e-8
         P_filt[t] = (np.eye(dim) - np.outer(K, L_t)) @ P_pred[t]
-        loglik += -0.5 * (np.log(2 * np.pi * S_t) + residuals[t]**2 / S_t)
+        loglik += -0.5 * (np.log(2 * np.pi * S_t) + v_t**2 / S_t)
 
     return yhat, residuals, x_filt, P_filt, x_pred, P_pred, Tmat, cross_beta_contrib, loglik
 

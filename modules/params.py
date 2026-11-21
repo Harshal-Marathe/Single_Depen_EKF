@@ -31,6 +31,19 @@ def _make_globals(cfg: dict):
     g["TRANSFORM_TYPE"]      = cfg.get("transform_type", "hill")    # "power"   | "hill"
     g["ADSTOCK_N_LAGS"]      = int(cfg.get("adstock_n_lags", 8))    # only for weibull
 
+    # ── Cochrane-Orcutt AR(1) error correction (OPTIONAL, off by default) ──
+    # USE_COCHRANE_ORCUTT: master switch (Tab 4 · G). CO_MAX_ITER / CO_TOL:
+    # iterate  fit -> estimate rho from residuals -> refit  until
+    # |rho_new - rho_old| < CO_TOL or CO_MAX_ITER fits. CO_RHO: the AR(1)
+    # coefficient the filter is CURRENTLY using (0.0 = ordinary white-noise
+    # filter, identical to pre-CO behaviour); modules/cochrane_orcutt.py
+    # updates it between fits and modules/kalman.py reads it.
+    g["USE_COCHRANE_ORCUTT"] = bool(cfg.get("use_cochrane_orcutt", False))
+    g["CO_MAX_ITER"]         = int(cfg.get("co_max_iter", 5))
+    g["CO_TOL"]              = float(cfg.get("co_tol", 0.01))
+    g["CO_KEEP_FIRST"]       = bool(cfg.get("co_keep_first_obs", True))  # True: Prais-Winsten first row; False: classical CO (drop it)
+    g["CO_RHO"]              = 0.0
+
     g["POSITIVE_BETA_COLS"]  = cfg.get("positive_beta_cols", [])
     g["NEGATIVE_BETA_COLS"]  = cfg.get("negative_beta_cols", [])
     g["PER_CHANNEL_BOUNDS"]  = cfg.get("per_channel_bounds", {})

@@ -12,6 +12,7 @@ from modules.dependencies import NEVERGRAD_AVAILABLE
 from modules.params import _make_globals, unpack_theta
 from modules.bounds import _build_theta0_and_bounds
 from modules.optimizer import run_nevergrad_optimizer
+from modules.cochrane_orcutt import run_cochrane_orcutt
 from modules.kalman import (
     run_kalman_filter, rts_smoother, _precompute_adstocked, _build_observation_matrix,
     _effector_series,
@@ -25,16 +26,19 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
     theta0, bounds = _build_theta0_and_bounds(df_train, g)
 
-    if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
-        best_theta, _ = run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg)
-        opt_success = True; opt_nit = ng_cfg.get("budget", 500)
-    else:
+    def _fit(theta_start):
+        """One full optimizer run (at whatever g["CO_RHO"] currently is).
+        Returns (best_theta, success, n_iterations)."""
+        if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
+            best, _ = run_nevergrad_optimizer(df_train, g, theta_start, bounds, ng_cfg)
+            return best, True, ng_cfg.get("budget", 500)
+
         def objective(theta):
             p = unpack_theta(theta, g)
             _, _, _, _, _, _, _, _, loglik = run_kalman_filter(df_train, p, g)
             return -loglik
 
-        def _fit(x0, bnds):
+        def _min(x0, bnds):
             return minimize(objective, x0, method=method, bounds=bnds,
                             options={"maxiter": max_iter, "ftol": 1e-9})
 
@@ -45,16 +49,45 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
             # Stage 2: release gamma starting from the stage-1 solution.
             # Keeping the better of the two guarantees adding effectors
             # can never fit worse than the no-effector model.
+            # (gamma is released at theta_start's gamma — the default init on
+            # the first fit, the previous round's fitted gamma on a CO refit.)
             gi = g["N_MEDIA"] + 1 + g["N_MEDIA"]          # start of gamma block
-            th1 = theta0.copy(); th1[gi:gi+N_EFF] = 0.0
-            b1 = list(bounds);   b1[gi:gi+N_EFF] = [(0.0, 0.0)] * N_EFF
-            opt1 = _fit(th1, b1)
-            th2 = opt1.x.copy(); th2[gi:gi+N_EFF] = theta0[gi:gi+N_EFF]
-            opt2 = _fit(th2, bounds)
+            th1 = theta_start.copy(); th1[gi:gi+N_EFF] = 0.0
+            b1 = list(bounds);        b1[gi:gi+N_EFF] = [(0.0, 0.0)] * N_EFF
+            opt1 = _min(th1, b1)
+            th2 = opt1.x.copy(); th2[gi:gi+N_EFF] = theta_start[gi:gi+N_EFF]
+            opt2 = _min(th2, bounds)
             opt = opt2 if opt2.fun <= opt1.fun else opt1
         else:
-            opt = _fit(theta0, bounds)
-        best_theta = opt.x; opt_success = opt.success; opt_nit = opt.nit
+            opt = _min(theta_start, bounds)
+        return opt.x, opt.success, opt.nit
+
+    co_info = None
+    if g["USE_COCHRANE_ORCUTT"]:
+        # Optional Cochrane-Orcutt loop (modules/cochrane_orcutt.py): fit ->
+        # estimate AR(1) rho from the train residuals -> refit with the
+        # quasi-differenced update -> repeat until rho stops moving. Iteration
+        # 1 (rho = 0) is the ordinary fit; later ones warm-start from it.
+        fit_state = {"success": True, "nit": 0}
+
+        def fit_fn(rhos, theta_init):
+            g["CO_RHO"] = rhos[0]
+            th, ok, nit = _fit(theta0 if theta_init is None else theta_init)
+            fit_state["success"] = ok; fit_state["nit"] += nit
+            return th
+
+        def resid_fn(theta, rhos):
+            g["CO_RHO"] = rhos[0]
+            p = unpack_theta(theta, g)
+            _, resid, *_ = run_kalman_filter(df_train, p, g)
+            return [resid[1:]]   # drop t=0: it only reflects the initial-state guess
+
+        best_theta, rhos, co_info = run_cochrane_orcutt(
+            fit_fn, resid_fn, 1, g["CO_MAX_ITER"], g["CO_TOL"])
+        g["CO_RHO"] = rhos[0]                      # the rho the final theta was fitted with
+        opt_success, opt_nit = fit_state["success"], fit_state["nit"]
+    else:
+        best_theta, opt_success, opt_nit = _fit(theta0)
 
     params = unpack_theta(best_theta, g)
     yhat, residuals, x_filt, P_filt, x_pred, P_pred, Tmat, cross_beta_contrib, loglik = \
@@ -268,6 +301,10 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         ]
     param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"G0",     "Value":params["G0"]})
     param_rows.append({"Category":"Global","Variable":"Noise",    "Parameter":"sigma_y","Value":params["sigma_y"]})
+    if g.get("USE_COCHRANE_ORCUTT"):
+        # AR(1) coefficient of the observation errors, as converged by the
+        # Cochrane-Orcutt loop (modules/cochrane_orcutt.py).
+        param_rows.append({"Category":"Global","Variable":"Cochrane-Orcutt","Parameter":"rho_AR1","Value":g.get("CO_RHO", 0.0)})
     if g["USE_ORGANIC_DRIFT"]:
         param_rows.append({"Category":"Global","Variable":"Organic drift","Parameter":"mu","Value":params["mu"]})
 
@@ -277,10 +314,23 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
 
     param_df = pd.DataFrame(param_rows)
 
-    return {
+    co_result = None
+    if co_info is not None:
+        co_result = {
+            "enabled": True,
+            "rho": co_info["rho"][0], "rho_hat_last": co_info["rho_hat_last"][0],
+            "converged": co_info["converged"], "n_iter": co_info["n_iter"],
+            "tol": co_info["tol"], "max_iter": co_info["max_iter"],
+            "history": [h for h in co_info["history"] if h["eq"] == 1],
+        }
+
+    result = {
         "params":params,"yhat_smooth":yhat_smooth,"residuals":resid_smooth,
         "x_smooth":x_smooth,"P_smooth":P_smooth,"adstocked_media":adstocked_media,
         "contrib_df":contrib_df,"roi_df":roi_df,"param_df":param_df,"synergy_df":synergy_df,
         "loglik":loglik,"mape":mape,"r2":r2,
         "success":opt_success,"nit":opt_nit,"g":g,
     }
+    if co_result is not None:
+        result["co_info"] = co_result
+    return result
