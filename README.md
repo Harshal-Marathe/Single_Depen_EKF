@@ -51,3 +51,39 @@ was merged into the dataset out-of-band in Tab 2). It also supports a
 `require=` argument to permanently re-inject specific values (like new
 prophet columns) into a selection on every rerun, regardless of what
 else the user has clicked.
+
+## Cochrane-Orcutt AR(1) error correction (optional)
+
+Off by default. Tick **Fit with Cochrane-Orcutt AR(1) error correction** in
+Tab 4 (section G) and save the configuration; every fit after that runs the
+loop in `modules/cochrane_orcutt.py`:
+
+1. fit all parameters (ρ = 0 on the first pass — the ordinary fit, including its
+   two-stage intercept-effector step)
+2. estimate ρ from the one-step-ahead train residuals: ρ̂ = Σ eₜeₜ₋₁ / Σ eₜ₋₁²
+3. refit with the observation quasi-differenced:
+   yₜ − ρ·yₜ₋₁ = (Lₜ − ρ·Lₜ₋₁)·xₜ + uₜ
+4. repeat until |ρ̂ − ρ| < tolerance or the max number of iterations is reached
+
+Notes:
+- Fitted values, contributions, ROI and metrics are still computed on the
+  original (non-differenced) Lₜ·xₜ, so betas keep their structural meaning.
+- The first observation is kept with Prais-Winsten scaling by default (it anchors
+  the initial state); untick it for classical Cochrane-Orcutt (first obs dropped).
+- Each CO iteration is a full optimizer run → runtime ≈ iterations × normal run.
+- Tab 5 shows ρ, the iteration history and Durbin-Watson (before, and whitened
+  after); the parameter table gets a `rho_AR1` row.
+- With the option off, results are identical to the previous version.
+
+## Optimizers (same as the 2-dependent app)
+
+- **L-BFGS-B / SLSQP** run in a per-parameter-normalized space
+  (`modules/bounds.py::build_normalized_problem`), so a single finite-difference
+  step is proportional to each parameter's own range (otherwise small-range
+  parameters such as Hill's `n` can stay stuck at their starting value). The
+  two-stage intercept-effector fit is unchanged, each stage just runs normalized.
+- **Nevergrad** also searches in the normalized space, minimises plain `−loglik`
+  (same objective as the gradient optimizers), evaluates `Parallel workers`
+  candidates at a time on a thread pool, and defaults to NGOpt. The old weighted
+  multi-objective loss (MAPE / R² targets, positivity penalties) and its loss-weight
+  controls were removed.
